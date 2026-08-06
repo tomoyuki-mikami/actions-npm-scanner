@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Action represents a GitHub Action
@@ -20,23 +21,25 @@ func main() {
 	verboseShort := flag.Bool("v", false, "show detailed scan output")
 	verboseLong := flag.Bool("verbose", false, "show detailed scan output")
 	failOnError := flag.Bool("fail-on-error", false, "exit with code 2 when the scan reported any error")
+	noRecursive := flag.Bool("no-recursive", false, "scan only the dependency files directly in the given directory")
 	flag.Parse()
 
 	if flag.NArg() != 1 {
-		fmt.Printf("Usage: %s [--local] [-v|--verbose] [--fail-on-error] <path>\n", filepath.Base(os.Args[0]))
+		fmt.Printf("Usage: %s [--local] [-v|--verbose] [--fail-on-error] [--no-recursive] <path>\n", filepath.Base(os.Args[0]))
 		os.Exit(1)
 	}
 
 	path := flag.Arg(0)
 	verbose := *verboseShort || *verboseLong
+	recursive := !*noRecursive
 	vulnerabilityCatalog := GetVulnerabilityCatalog()
 
 	var summary ScanSummary
 	var err error
 	if *localMode {
-		summary, err = runLocalScan(path, vulnerabilityCatalog, verbose)
+		summary, err = runLocalScan(path, vulnerabilityCatalog, verbose, recursive)
 	} else {
-		summary, err = runWorkflowScan(path, vulnerabilityCatalog, verbose)
+		summary, err = runWorkflowScan(path, vulnerabilityCatalog, verbose, recursive)
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
@@ -57,9 +60,13 @@ func main() {
 type ScanSummary struct {
 	WorkflowsScanned int
 	ActionsScanned   int
-	FilesFailed      int
-	Vulnerabilities  []ScanFinding
-	Errors           []string
+	// FilesScanned counts the dependency files whose contents were actually
+	// checked. It is what separates "looked and found nothing" from "never
+	// opened a file", which otherwise print the same clean result.
+	FilesScanned    int
+	FilesFailed     int
+	Vulnerabilities []ScanFinding
+	Errors          []string
 }
 
 func (summary ScanSummary) HasVulnerabilities() bool {
@@ -77,7 +84,7 @@ type ScanFinding struct {
 	Message  string
 }
 
-func runWorkflowScan(path string, vulnerabilityCatalog VulnerabilityCatalog, verbose bool) (ScanSummary, error) {
+func runWorkflowScan(path string, vulnerabilityCatalog VulnerabilityCatalog, verbose, recursive bool) (ScanSummary, error) {
 	files, err := getFiles(path)
 	if err != nil {
 		return ScanSummary{}, err
@@ -111,14 +118,18 @@ func runWorkflowScan(path string, vulnerabilityCatalog VulnerabilityCatalog, ver
 				continue
 			}
 
-			result := scanWorkflowAction(action, vulnerabilityCatalog, verbose)
+			result := scanWorkflowAction(action, vulnerabilityCatalog, verbose, recursive)
 			summary.Errors = append(summary.Errors, result.Errors...)
+			summary.FilesScanned += result.FilesScanned
 			summary.FilesFailed += result.FilesFailed
 			for _, vulnerability := range result.Vulnerabilities {
 				summary.Vulnerabilities = append(summary.Vulnerabilities, ScanFinding{
 					Workflow: file,
 					Action:   actionKey,
-					Message:  vulnerability,
+					// Only a finding from below the action root needs its
+					// location spelled out; the message already names the file.
+					Target:  vulnerability.Directory(),
+					Message: vulnerability.Message,
 				})
 			}
 			if result.Completed {
@@ -136,13 +147,14 @@ func actionScanKey(action Action) string {
 }
 
 type workflowActionScanResult struct {
-	Vulnerabilities []string
+	Vulnerabilities []fileVulnerability
 	Errors          []string
+	FilesScanned    int
 	FilesFailed     int
 	Completed       bool
 }
 
-func scanWorkflowAction(action Action, vulnerabilityCatalog VulnerabilityCatalog, verbose bool) workflowActionScanResult {
+func scanWorkflowAction(action Action, vulnerabilityCatalog VulnerabilityCatalog, verbose, recursive bool) workflowActionScanResult {
 	actionKey := actionScanKey(action)
 	tmpDir, err := os.MkdirTemp("", "action-")
 	if err != nil {
@@ -174,7 +186,7 @@ func scanWorkflowAction(action Action, vulnerabilityCatalog VulnerabilityCatalog
 	if verbose {
 		fmt.Printf("  🔍 Scanning action %s...\n", actionKey)
 	}
-	scanResult := scanAction(tmpDir, vulnerabilityCatalog, verbose)
+	scanResult := scanAction(tmpDir, vulnerabilityCatalog, verbose, recursive)
 
 	if verbose {
 		printVulnerabilityResult("    ", scanResult.Vulnerabilities)
@@ -189,25 +201,25 @@ func scanWorkflowAction(action Action, vulnerabilityCatalog VulnerabilityCatalog
 	return workflowActionScanResult{
 		Vulnerabilities: scanResult.Vulnerabilities,
 		Errors:          messages,
+		FilesScanned:    scanResult.FilesScanned,
 		FilesFailed:     len(scanResult.FileErrors),
 		Completed:       true,
 	}
 }
 
-func runLocalScan(path string, vulnerabilityCatalog VulnerabilityCatalog, verbose bool) (ScanSummary, error) {
+func runLocalScan(path string, vulnerabilityCatalog VulnerabilityCatalog, verbose, recursive bool) (ScanSummary, error) {
 	fileInfo, err := os.Stat(path)
 	if err != nil {
 		return ScanSummary{}, err
 	}
 
 	summary := ScanSummary{}
-	var vulnerabilities []string
+	var scanResult actionScanResult
 	if fileInfo.IsDir() {
 		if verbose {
 			fmt.Println("Scanning local path:", path)
 		}
-		scanResult := scanAction(path, vulnerabilityCatalog, verbose)
-		vulnerabilities = scanResult.Vulnerabilities
+		scanResult = scanAction(path, vulnerabilityCatalog, verbose, recursive)
 		summary.Errors = append(summary.Errors, scanResult.FileErrors...)
 		summary.FilesFailed = len(scanResult.FileErrors)
 	} else {
@@ -216,25 +228,35 @@ func runLocalScan(path string, vulnerabilityCatalog VulnerabilityCatalog, verbos
 		}
 		vulnerablePackageMap := buildVulnerablePackageMap(vulnerabilityCatalog.NpmPackages)
 		pypiPackageMap := buildVulnerablePypiPackageMap(vulnerabilityCatalog.PypiPackages)
-		vulnerabilities, err = scanDependencyFile(path, vulnerablePackageMap, pypiPackageMap)
+		vulnerabilities, err := scanDependencyFile(path, vulnerablePackageMap, pypiPackageMap)
 		if err != nil {
 			return ScanSummary{}, err
 		}
+		scanResult.FilesScanned = 1
+		scanResult.addVulnerabilities(filepath.Base(path), vulnerabilities)
 	}
+	summary.FilesScanned = scanResult.FilesScanned
 
 	if verbose {
-		printVulnerabilityResult("  ", vulnerabilities)
+		printVulnerabilityResult("  ", scanResult.Vulnerabilities)
 	}
-	for _, vulnerability := range vulnerabilities {
+	for _, vulnerability := range scanResult.Vulnerabilities {
+		target := path
+		if fileInfo.IsDir() {
+			// Point at the dependency file itself rather than at the directory
+			// the scan started from, so a finding in a subdirectory is
+			// traceable to the file it came from.
+			target = filepath.Join(path, vulnerability.Path)
+		}
 		summary.Vulnerabilities = append(summary.Vulnerabilities, ScanFinding{
-			Target:  path,
-			Message: vulnerability,
+			Target:  target,
+			Message: vulnerability.Message,
 		})
 	}
 	return summary, nil
 }
 
-func printVulnerabilityResult(indent string, vulnerabilities []string) {
+func printVulnerabilityResult(indent string, vulnerabilities []fileVulnerability) {
 	if len(vulnerabilities) > 0 {
 		fmt.Println(indent + "⚠️ Found vulnerabilities:")
 		for _, vulnerability := range vulnerabilities {
@@ -253,6 +275,7 @@ func printScanSummary(summary ScanSummary) {
 	}
 	fmt.Printf("Workflows scanned: %d\n", summary.WorkflowsScanned)
 	fmt.Printf("Actions scanned: %d\n", summary.ActionsScanned)
+	fmt.Printf("Dependency files scanned: %d\n", summary.FilesScanned)
 	fmt.Printf("Vulnerabilities found: %d\n", len(summary.Vulnerabilities))
 	fmt.Printf("Files failed: %d\n", summary.FilesFailed)
 	fmt.Printf("Errors: %d\n", len(summary.Errors))
@@ -275,15 +298,24 @@ func printScanSummary(summary ScanSummary) {
 }
 
 func formatScanFinding(finding ScanFinding) string {
-	if finding.Workflow != "" && finding.Action != "" {
-		return fmt.Sprintf("%s | %s: %s", finding.Workflow, finding.Action, finding.Message)
+	segments := make([]string, 0, 3)
+	for _, segment := range []string{finding.Workflow, finding.Action, finding.Target} {
+		if segment != "" {
+			segments = append(segments, segment)
+		}
 	}
-	if finding.Target != "" {
-		return fmt.Sprintf("%s: %s", finding.Target, finding.Message)
+	if len(segments) == 0 {
+		return finding.Message
 	}
-	return finding.Message
+	return fmt.Sprintf("%s: %s", strings.Join(segments, " | "), finding.Message)
 }
 
+// getFiles lists the workflow files to parse. Unlike a dependency scan this
+// stays non-recursive on purpose: GitHub only runs the workflow files directly
+// in .github/workflows, so any YAML in a subdirectory below it is something
+// else -- a composite action, a Dependabot config, a Kubernetes manifest --
+// and parsing those as workflows would report errors for files that were never
+// workflows to begin with. --no-recursive therefore does not apply here.
 func getFiles(path string) ([]string, error) {
 	fileInfo, err := os.Stat(path)
 	if err != nil {

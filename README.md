@@ -37,6 +37,7 @@ In late 2025, the "Second Coming" NPM contamination campaign was discovered, whi
 - 🐍 **Python Lockfile Coverage**: Scans `requirements*.txt`, `Pipfile.lock`, `poetry.lock`, and `uv.lock`
 - 📂 **Flexible Input**: Supports both single file and directory scanning
 - 💻 **Local Dependency Scanning**: Scans local dependency files or directories with `--local`
+- 🌳 **Recursive by Default**: Walks subdirectories so a monorepo's lockfiles are found, skipping `node_modules`, `.git`, `vendor`, `.venv`, and `venv`
 - ⚡ **Fast Performance**: Leverages Go concurrency for efficient scanning
 - 🌐 **Git Integration**: Automatically clones and analyzes action repositories
 
@@ -80,9 +81,16 @@ actions-npm-scanner .github/workflows/
 # Scan a single dependency file
 actions-npm-scanner --local package.json
 
-# Scan supported dependency files directly under a directory
+# Scan a directory and its subdirectories
 actions-npm-scanner --local .
+
+# Scan only the dependency files directly under a directory
+actions-npm-scanner --local --no-recursive .
 ```
+
+A directory scan descends into subdirectories, so a monorepo whose lockfiles all live under `packages/` or `apps/` is covered by scanning the repository root. `node_modules`, `.git`, `vendor`, `.venv`, and `venv` are skipped, because they hold installed third-party artifacts rather than the project's own dependency declarations — the lockfile that produced them is scanned instead. A skipped directory is still scanned when you point the command at it directly.
+
+Findings name the dependency file they came from, so the summary tells you which subdirectory to fix.
 
 ### From Source
 
@@ -131,9 +139,11 @@ jobs:
 
 If either scan finds a vulnerability, that step exits with status code `1` and the job fails. Keeping the scans in separate steps makes it easier to see whether the failure came from a referenced action or a local dependency file.
 
-`actions-npm-scanner --local .` scans supported dependency files directly under the repository root. Add another `run` step with the target path when dependencies live in a subdirectory.
+`actions-npm-scanner --local .` scans the repository root and its subdirectories, so dependency files below the root no longer need a `run` step of their own. Add `--no-recursive` to scan only the files directly under the given directory.
 
 Add `-v` or `--verbose` to show detailed per-action and per-file scan output before the summary.
+
+`Dependency files scanned` in the summary reports how many dependency files were actually read. A clean result with a count of `0` means nothing was examined, not that nothing was found.
 
 A dependency file that cannot be parsed is reported as a failed file, and the remaining files in the same directory are still scanned. Failed files are counted as `Files failed` in the summary and their details are written to stderr, so a pipeline that only greps stdout cannot mistake a partial scan for a clean one. Add `--fail-on-error` to exit with status code `2` when the scan reported at least one error. That covers more than `Files failed`: an action that could not be downloaded leaves `Files failed` at zero because none of its files were reached, and it is still counted as an error.
 
@@ -146,6 +156,7 @@ The command scans all requested targets before exiting. If any vulnerability is 
 ✅ No vulnerabilities found.
 Workflows scanned: 1
 Actions scanned: 2
+Dependency files scanned: 3
 Vulnerabilities found: 0
 Files failed: 0
 Errors: 0
@@ -156,11 +167,25 @@ Errors: 0
 ⚠️ Found vulnerabilities.
 Workflows scanned: 1
 Actions scanned: 2
+Dependency files scanned: 3
 Vulnerabilities found: 1
 Files failed: 0
 Errors: 0
 Vulnerability details:
   - .github/workflows/ci.yml | some-user/vulnerable-action@v1: Found vulnerable package @ctrl/tinycolor with version 4.1.1 in package.json (dependencies)
+```
+
+### Vulnerabilities Found in a Subdirectory
+```
+⚠️ Found vulnerabilities.
+Workflows scanned: 0
+Actions scanned: 0
+Dependency files scanned: 2
+Vulnerabilities found: 1
+Files failed: 0
+Errors: 0
+Vulnerability details:
+  - packages/foo/package-lock.json: Found vulnerable package @ctrl/tinycolor with version 4.1.1 in package-lock.json
 ```
 
 ### Verbose Output
@@ -180,12 +205,14 @@ Scanning workflow: .github/workflows/ci.yml
        package-lock.json not found. Skipping.
        yarn.lock not found. Skipping.
        pnpm-lock.yaml not found. Skipping.
+    🔍 Scanning packages/core/package-lock.json...
     ⚠️ Found vulnerabilities:
       -  Found vulnerable package @ctrl/tinycolor with version 4.1.1 in package.json (dependencies)
   Scan finished for action some-user/vulnerable-action@v1.
 ⚠️ Found vulnerabilities.
 Workflows scanned: 1
 Actions scanned: 2
+Dependency files scanned: 4
 Vulnerabilities found: 1
 Files failed: 0
 Errors: 0
@@ -197,7 +224,7 @@ Vulnerability details:
 
 1. **YAML Parsing**: Parses GitHub Actions workflow files to extract action references
 2. **Repository Cloning**: Downloads each referenced action repository using go-git
-3. **Package Analysis**: Searches for npm and Python dependency files
+3. **Package Analysis**: Searches the repository and its subdirectories for npm and Python dependency files
 4. **Vulnerability Matching**: Compares found packages against static Shai-Hulud, Mini Shai-Hulud, and keyv/cacheable compromise indicators
 5. **Reporting**: Provides detailed output on any vulnerabilities discovered
 
@@ -290,6 +317,7 @@ Socketのキャンペーンデータには、Go 8モジュール、24 artifacts�
 - 🐍 **Pythonロックファイル対応**: `requirements*.txt`、`Pipfile.lock`、`poetry.lock`、`uv.lock`をスキャン
 - 📂 **柔軟な入力**: 単一ファイルとディレクトリスキャンの両方をサポート
 - 💻 **ローカル依存ファイルスキャン**: `--local`でローカルの依存ファイルまたはディレクトリをスキャン
+- 🌳 **デフォルトで再帰**: サブディレクトリまで辿るためモノレポのロックファイルも検出。`node_modules`、`.git`、`vendor`、`.venv`、`venv`は除外
 - ⚡ **高速パフォーマンス**: Goの並行処理を活用した効率的なスキャン
 - 🌐 **Git統合**: アクションリポジトリの自動クローンと分析
 
@@ -329,9 +357,16 @@ actions-npm-scanner .github/workflows/
 # 単一の依存ファイルをスキャン
 actions-npm-scanner --local package.json
 
-# ディレクトリ直下の対応依存ファイルをスキャン
+# ディレクトリとそのサブディレクトリをスキャン
 actions-npm-scanner --local .
+
+# ディレクトリ直下の対応依存ファイルだけをスキャン
+actions-npm-scanner --local --no-recursive .
 ```
+
+ディレクトリを指定したスキャンはサブディレクトリまで辿ります。ロックファイルが`packages/`や`apps/`の下にしかないモノレポでも、リポジトリルートを指定すれば対象になります。`node_modules`、`.git`、`vendor`、`.venv`、`venv`は除外します。これらはプロジェクト自身の依存宣言ではなくインストール済みの第三者成果物を置く場所であり、その元になったロックファイルの方をスキャンするためです。除外対象のディレクトリを直接指定した場合は、そのままスキャンします。
+
+検出結果には見つかった依存ファイルのパスが付くため、サマリを見ればどのサブディレクトリを直せばよいかがわかります。
 
 ### ソースから実行
 
@@ -380,7 +415,9 @@ jobs:
 
 どちらかのスキャンで脆弱性が見つかると、そのステップは終了コード`1`で失敗し、ジョブも失敗します。ステップを分けているため、参照アクションとローカル依存ファイルのどちらで検知したかをActionsログ上で確認しやすくなります。
 
-`actions-npm-scanner --local .` はリポジトリ直下の対応依存ファイルを対象にします。サブディレクトリの依存ファイルも見る場合は、対象パスごとに `run` ステップを追加してください。
+`actions-npm-scanner --local .` はリポジトリルートとそのサブディレクトリを対象にするため、ルート以外にある依存ファイルのために `run` ステップを追加する必要はありません。指定したディレクトリの直下だけを見たい場合は `--no-recursive` を付けてください。
+
+サマリの`Dependency files scanned`は、実際に読み込んだ依存ファイルの件数です。この値が`0`のcleanは「何も見つからなかった」ではなく「1件も検査していない」を意味します。
 
 解析できなかった依存ファイルは失敗ファイルとして記録され、同じディレクトリの残りのファイルはそのままスキャンされます。失敗したファイル数はサマリの`Files failed`に表示され、詳細はstderrに出力されます。これにより、stdoutをgrepするだけの自動化が部分的なスキャン結果をcleanと取り違えることを防げます。エラーが1件以上あった場合に終了コード`2`で終了させるには`--fail-on-error`を付けてください。対象は`Files failed`より広く、ダウンロードできなかったアクションはファイルに到達していないため`Files failed`が0のままですが、エラーとしては計上されます。
 
@@ -390,7 +427,7 @@ jobs:
 
 1. **YAML解析**: GitHub Actionsワークフローファイルを解析してアクション参照を抽出
 2. **リポジトリクローン**: go-gitを使用して各参照されたアクションリポジトリをダウンロード
-3. **パッケージ分析**: npmとPythonの依存関係ファイルを検索
+3. **パッケージ分析**: リポジトリとそのサブディレクトリからnpmとPythonの依存関係ファイルを検索
 4. **脆弱性マッチング**: 発見されたパッケージをShai-Hulud、Mini Shai-Hulud、keyv/cacheable侵害の静的IoCカタログと比較
 5. **レポート**: 発見された脆弱性について詳細な出力を提供
 

@@ -209,9 +209,9 @@ func TestScanActionKeepsFindingsWhenDependencyFileFails(t *testing.T) {
 		{Name: "@ctrl/tinycolor", Versions: []string{"4.1.1"}},
 	}
 
-	result := scanAction(tmpDir, testNpmCatalog(vulnerablePackages), false)
+	result := scanAction(tmpDir, testNpmCatalog(vulnerablePackages), false, true)
 
-	assertVulnerabilityReported(t, result.Vulnerabilities, "@ctrl/tinycolor", "4.1.1", "package.json (dependencies)")
+	assertVulnerabilityReported(t, result.Messages(), "@ctrl/tinycolor", "4.1.1", "package.json (dependencies)")
 	if len(result.FileErrors) != 1 {
 		t.Errorf("expected 1 file error, got %d: %v", len(result.FileErrors), result.FileErrors)
 	}
@@ -222,6 +222,75 @@ func TestScanActionKeepsFindingsWhenDependencyFileFails(t *testing.T) {
 		t.Error("expected ScanAction() to report the unparsable pnpm-lock.yaml")
 	}
 	assertVulnerabilityReported(t, vulnerabilities, "@ctrl/tinycolor", "4.1.1", "package.json (dependencies)")
+}
+
+func TestCollectScanDirectoriesSkipsInstalledArtifactDirectories(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{
+		"packages/foo",
+		"dist",
+		"node_modules/@ctrl/tinycolor",
+		".git/objects",
+		"vendor/github.com/example",
+		".venv/lib",
+		"venv/lib",
+	} {
+		if err := os.MkdirAll(filepath.Join(root, filepath.FromSlash(dir)), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	directories, walkErrors := collectScanDirectories(root, true)
+	if len(walkErrors) != 0 {
+		t.Fatalf("unexpected walk errors: %v", walkErrors)
+	}
+
+	// dist is kept: it is small, and for an action it is the committed code
+	// that actually runs.
+	expected := []string{".", "dist", "packages", filepath.Join("packages", "foo")}
+	assertDirectoriesEqual(t, directories, expected)
+}
+
+// The skip list keeps a scan from wandering into installed packages, but a user
+// who points the scan at one of those directories asked for it explicitly.
+func TestCollectScanDirectoriesScansSkippedDirectoryWhenPointedAtIt(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "node_modules")
+	if err := os.MkdirAll(filepath.Join(root, "some-dep"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	directories, walkErrors := collectScanDirectories(root, true)
+	if len(walkErrors) != 0 {
+		t.Fatalf("unexpected walk errors: %v", walkErrors)
+	}
+
+	assertDirectoriesEqual(t, directories, []string{".", "some-dep"})
+}
+
+func TestCollectScanDirectoriesWithoutRecursionReturnsRootOnly(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "packages", "foo"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	directories, walkErrors := collectScanDirectories(root, false)
+	if len(walkErrors) != 0 {
+		t.Fatalf("unexpected walk errors: %v", walkErrors)
+	}
+
+	assertDirectoriesEqual(t, directories, []string{"."})
+}
+
+func assertDirectoriesEqual(t *testing.T, directories, expected []string) {
+	t.Helper()
+	if len(directories) != len(expected) {
+		t.Fatalf("collectScanDirectories() = %v, want %v", directories, expected)
+	}
+	for i, directory := range directories {
+		if directory != expected[i] {
+			t.Fatalf("collectScanDirectories() = %v, want %v", directories, expected)
+		}
+	}
 }
 
 func assertVulnerabilityReported(t *testing.T, vulnerabilities []string, pkgName, version, filename string) {

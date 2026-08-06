@@ -132,6 +132,71 @@ func TestLocalScanDirectoryWithVulnerability(t *testing.T) {
 	assertNotContains(t, output, "🔍 Scanning package.json...")
 }
 
+// A monorepo keeps its lockfiles below the root. Scanning the root used to
+// report clean without having opened a single one of them.
+func TestLocalScanFindsDependencyFileInSubdirectory(t *testing.T) {
+	tmpDir := writeMonorepoWithVulnerableSubdirectory(t)
+
+	output, err := runScannerCommand("--local", tmpDir)
+	assertExitCode(t, err, 1, output)
+
+	lockfilePath := filepath.Join(tmpDir, "packages", "foo", "package-lock.json")
+	expectedStrings := []string{
+		"⚠️ Found vulnerabilities.",
+		"Dependency files scanned: 1",
+		"Vulnerabilities found: 1",
+		"Files failed: 0",
+		"Errors: 0",
+		// The finding names the file it came from, not the directory the scan
+		// was pointed at.
+		lockfilePath + ": Found vulnerable package @ctrl/tinycolor with version 4.1.1 in package-lock.json",
+	}
+	for _, expected := range expectedStrings {
+		assertContains(t, output, expected)
+	}
+}
+
+// node_modules holds installed third-party packages rather than the
+// declarations of the project itself, and walking it dwarfs the rest of a scan.
+func TestLocalScanSkipsNodeModules(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeTestFile(t, filepath.Join(tmpDir, "node_modules", "some-dep", "package.json"), `{
+	  "name": "some-dep",
+	  "dependencies": {
+	    "@ctrl/tinycolor": "4.1.1"
+	  }
+	}`)
+
+	output, err := runScannerCommand("--local", tmpDir)
+	assertExitCode(t, err, 0, output)
+
+	expectedStrings := []string{
+		"✅ No vulnerabilities found.",
+		"Dependency files scanned: 0",
+		"Vulnerabilities found: 0",
+	}
+	for _, expected := range expectedStrings {
+		assertContains(t, output, expected)
+	}
+	assertNotContains(t, output, "@ctrl/tinycolor")
+}
+
+func TestLocalScanNoRecursiveSkipsSubdirectories(t *testing.T) {
+	tmpDir := writeMonorepoWithVulnerableSubdirectory(t)
+
+	output, err := runScannerCommand("--local", "--no-recursive", tmpDir)
+	assertExitCode(t, err, 0, output)
+
+	expectedStrings := []string{
+		"✅ No vulnerabilities found.",
+		"Dependency files scanned: 0",
+		"Vulnerabilities found: 0",
+	}
+	for _, expected := range expectedStrings {
+		assertContains(t, output, expected)
+	}
+}
+
 // A pnpm v9 lockfile used to abort the whole directory scan, which silently
 // dropped the findings of the package.json next to it.
 func TestLocalScanDirectoryWithPnpmV9Lockfile(t *testing.T) {
@@ -326,9 +391,30 @@ func assertExitCode(t *testing.T, err error, expected int, output string) {
 
 func writeTestFile(t *testing.T, path, content string) {
 	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// writeMonorepoWithVulnerableSubdirectory builds a tree whose only dependency
+// file sits below the root, which is the layout that reported clean before the
+// scan became recursive.
+func writeMonorepoWithVulnerableSubdirectory(t *testing.T) string {
+	t.Helper()
+	tmpDir := t.TempDir()
+	writeTestFile(t, filepath.Join(tmpDir, "README.md"), "# monorepo\n")
+	writeTestFile(t, filepath.Join(tmpDir, "packages", "foo", "package-lock.json"), `{
+	  "lockfileVersion": 3,
+	  "packages": {
+	    "node_modules/@ctrl/tinycolor": {
+	      "version": "4.1.1"
+	    }
+	  }
+	}`)
+	return tmpDir
 }
 
 func writeWorkflowWithVulnerableAction(t *testing.T) string {

@@ -57,7 +57,7 @@ git ls-remote origin refs/heads/main refs/tags/vX.Y.Z refs/tags/vX.Y.Z^{}
 
 1. YAMLワークフローファイルを解析してアクションを抽出
 2. 各アクションのGitHubリポジトリを一時ディレクトリにクローン
-3. 複数のパッケージマネージャファイルを検索：
+3. 対象ディレクトリとそのサブディレクトリ（`node_modules`、`.git`、`vendor`、`.venv`、`venv`は除外）から複数のパッケージマネージャファイルを検索：
    - package.json（npm）
    - package-lock.json（npm v1/v2/v3対応、resolvedフィールドからの正確なバージョン抽出）
    - yarn.lock（yarn）
