@@ -19,7 +19,7 @@ func main() {
 	localMode := flag.Bool("local", false, "scan a local dependency file or directory")
 	verboseShort := flag.Bool("v", false, "show detailed scan output")
 	verboseLong := flag.Bool("verbose", false, "show detailed scan output")
-	failOnError := flag.Bool("fail-on-error", false, "exit with code 2 when some files could not be scanned")
+	failOnError := flag.Bool("fail-on-error", false, "exit with code 2 when the scan reported any error")
 	flag.Parse()
 
 	if flag.NArg() != 1 {
@@ -46,6 +46,9 @@ func main() {
 	if summary.HasVulnerabilities() {
 		os.Exit(1)
 	}
+	// Any error means the scan was incomplete, so the flag keys off the error
+	// count rather than Files failed. An action that could not be downloaded
+	// leaves Files failed at zero yet was never scanned at all.
 	if *failOnError && summary.HasErrors() {
 		os.Exit(2)
 	}

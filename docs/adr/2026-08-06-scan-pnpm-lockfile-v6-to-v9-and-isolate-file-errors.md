@@ -27,7 +27,7 @@ In scope:
 - Accept both the scalar and the `specifier`/`version` mapping form of a dependency entry, and ignore non-registry references such as `link:../shared`.
 - Collect per-file failures in `actionScanResult.FileErrors` and keep scanning the remaining files in the directory.
 - Report the number of unscanned files as `Files failed` in the summary and write error details to stderr.
-- Add `--fail-on-error` to exit with status code `2` when at least one file could not be scanned.
+- Add `--fail-on-error` to exit with status code `2` when the scan reported at least one error. Key the flag off the error count rather than `Files failed`, because an action that could not be downloaded was never scanned at all yet reaches none of its files, so it leaves `Files failed` at zero.
 
 Non-goals:
 

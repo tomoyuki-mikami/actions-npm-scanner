@@ -294,13 +294,14 @@ func runScannerCommand(args ...string) (string, error) {
 func runScannerBinary(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
 	binaryPath := filepath.Join(t.TempDir(), "actions-npm-scanner")
-	if out, err := exec.Command("go", "build", "-o", binaryPath, ".").CombinedOutput(); err != nil {
+	if out, err := exec.CommandContext(ctx, "go", "build", "-o", binaryPath, ".").CombinedOutput(); err != nil {
 		t.Fatalf("failed to build scanner: %v\n%s", err, out)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
 	out, err := exec.CommandContext(ctx, binaryPath, args...).CombinedOutput()
 	return string(out), err
 }

@@ -135,7 +135,7 @@ If either scan finds a vulnerability, that step exits with status code `1` and t
 
 Add `-v` or `--verbose` to show detailed per-action and per-file scan output before the summary.
 
-A dependency file that cannot be parsed is reported as a failed file, and the remaining files in the same directory are still scanned. Failed files are counted as `Files failed` in the summary and their details are written to stderr, so a pipeline that only greps stdout cannot mistake a partial scan for a clean one. Add `--fail-on-error` to exit with status code `2` when at least one file could not be scanned.
+A dependency file that cannot be parsed is reported as a failed file, and the remaining files in the same directory are still scanned. Failed files are counted as `Files failed` in the summary and their details are written to stderr, so a pipeline that only greps stdout cannot mistake a partial scan for a clean one. Add `--fail-on-error` to exit with status code `2` when the scan reported at least one error. That covers more than `Files failed`: an action that could not be downloaded leaves `Files failed` at zero because none of its files were reached, and it is still counted as an error.
 
 The command scans all requested targets before exiting. If any vulnerability is found, it exits with status code `1`; otherwise it exits with `0`.
 
@@ -382,7 +382,7 @@ jobs:
 
 `actions-npm-scanner --local .` はリポジトリ直下の対応依存ファイルを対象にします。サブディレクトリの依存ファイルも見る場合は、対象パスごとに `run` ステップを追加してください。
 
-解析できなかった依存ファイルは失敗ファイルとして記録され、同じディレクトリの残りのファイルはそのままスキャンされます。失敗したファイル数はサマリの`Files failed`に表示され、詳細はstderrに出力されます。これにより、stdoutをgrepするだけの自動化が部分的なスキャン結果をcleanと取り違えることを防げます。1件でもスキャンできなかったファイルがある場合に終了コード`2`で終了させるには`--fail-on-error`を付けてください。
+解析できなかった依存ファイルは失敗ファイルとして記録され、同じディレクトリの残りのファイルはそのままスキャンされます。失敗したファイル数はサマリの`Files failed`に表示され、詳細はstderrに出力されます。これにより、stdoutをgrepするだけの自動化が部分的なスキャン結果をcleanと取り違えることを防げます。エラーが1件以上あった場合に終了コード`2`で終了させるには`--fail-on-error`を付けてください。対象は`Files failed`より広く、ダウンロードできなかったアクションはファイルに到達していないため`Files failed`が0のままですが、エラーとしては計上されます。
 
 コマンドは対象を最後までスキャンしてから終了します。脆弱性が1件以上見つかった場合は終了コード`1`、見つからない場合は`0`で終了します。
 
