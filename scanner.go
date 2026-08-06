@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -188,37 +189,179 @@ func formatVulnerabilityMessage(pkgName, version, filename string, vulnerablePac
 	return fmt.Sprintf("Found vulnerable package %s with version %s in %s", pkgName, version, filename)
 }
 
-// actionScanResult holds the findings for a directory together with the files
-// that could not be scanned, so that one unreadable dependency file does not
-// discard the findings of the other files in the same directory.
-type actionScanResult struct {
-	Vulnerabilities []string
-	FileErrors      []string
+// fileVulnerability is a finding together with the dependency file it came
+// from, expressed relative to the directory the scan started at. A recursive
+// scan reports files from several directories at once, so the path is what
+// tells the user which one is affected.
+type fileVulnerability struct {
+	Path    string
+	Message string
 }
 
-func (result *actionScanResult) merge(vulnerabilities []string, fileErrors []string) {
-	result.Vulnerabilities = append(result.Vulnerabilities, vulnerabilities...)
-	result.FileErrors = append(result.FileErrors, fileErrors...)
-}
-
-// ScanAction scans a downloaded action for vulnerable packages.
-// Findings from the files that could be read are returned even when other
-// dependency files in the same directory failed to parse; the returned error
-// then describes those failures.
-func ScanAction(actionDir string, catalog VulnerabilityCatalog) ([]string, error) {
-	result := scanAction(actionDir, catalog, true)
-	if len(result.FileErrors) > 0 {
-		return result.Vulnerabilities, errors.New(strings.Join(result.FileErrors, "; "))
+// String renders the finding for human-readable output. The message already
+// names the file, so the location is only prefixed for a file below the
+// scanned directory; a scan of a single directory reads exactly as before.
+func (vulnerability fileVulnerability) String() string {
+	if directory := vulnerability.Directory(); directory != "" {
+		return fmt.Sprintf("%s: %s", directory, vulnerability.Message)
 	}
-	return result.Vulnerabilities, nil
+	return vulnerability.Message
 }
 
-func scanAction(actionDir string, catalog VulnerabilityCatalog, verbose bool) actionScanResult {
-	var result actionScanResult
+// Directory returns the subdirectory the finding came from, or an empty string
+// when the file sits directly in the scanned directory.
+func (vulnerability fileVulnerability) Directory() string {
+	if directory := filepath.Dir(vulnerability.Path); directory != "." {
+		return directory
+	}
+	return ""
+}
 
-	// Build optimized vulnerability map once
+// actionScanResult holds the findings for a directory tree together with the
+// files that could not be scanned, so that one unreadable dependency file does
+// not discard the findings of the other files.
+type actionScanResult struct {
+	Vulnerabilities []fileVulnerability
+	FileErrors      []string
+	FilesScanned    int
+}
+
+func (result *actionScanResult) merge(other actionScanResult) {
+	result.Vulnerabilities = append(result.Vulnerabilities, other.Vulnerabilities...)
+	result.FileErrors = append(result.FileErrors, other.FileErrors...)
+	result.FilesScanned += other.FilesScanned
+}
+
+func (result *actionScanResult) addVulnerabilities(relPath string, messages []string) {
+	for _, message := range messages {
+		result.Vulnerabilities = append(result.Vulnerabilities, fileVulnerability{Path: relPath, Message: message})
+	}
+}
+
+// Messages returns the findings as plain strings, each carrying its location.
+func (result actionScanResult) Messages() []string {
+	messages := make([]string, 0, len(result.Vulnerabilities))
+	for _, vulnerability := range result.Vulnerabilities {
+		messages = append(messages, vulnerability.String())
+	}
+	return messages
+}
+
+// skippedScanDirectories names the directories a recursive scan does not
+// descend into. They hold installed third-party artifacts or version-control
+// internals rather than the dependency declarations of the project itself, so
+// descending into them costs far more time than the rest of the tree combined
+// while reporting packages the project never declared. A directory named here
+// is still scanned when the scan is pointed at it directly.
+//
+// Build output such as dist/ and build/ is deliberately absent: it is small,
+// and for a GitHub Action dist/ is committed and is what actually runs, so a
+// dependency file in there is worth reading.
+var skippedScanDirectories = map[string]bool{
+	"node_modules": true,
+	".git":         true,
+	"vendor":       true,
+	".venv":        true,
+	"venv":         true,
+}
+
+// ScanAction scans a downloaded action, including its subdirectories, for
+// vulnerable packages. Findings from the files that could be read are returned
+// even when other dependency files failed to parse; the returned error then
+// describes those failures.
+func ScanAction(actionDir string, catalog VulnerabilityCatalog) ([]string, error) {
+	result := scanAction(actionDir, catalog, true, true)
+	if len(result.FileErrors) > 0 {
+		return result.Messages(), errors.New(strings.Join(result.FileErrors, "; "))
+	}
+	return result.Messages(), nil
+}
+
+// scanAction scans actionDir for dependency files. When recursive is set every
+// subdirectory outside skippedScanDirectories is scanned as well, which is what
+// keeps a monorepo whose lockfiles all live below the root from reporting clean
+// without having opened a single file.
+func scanAction(actionDir string, catalog VulnerabilityCatalog, verbose, recursive bool) actionScanResult {
+	// Build optimized vulnerability maps once for the whole tree
 	vulnerablePackageMap := buildVulnerablePackageMap(catalog.NpmPackages)
 	pypiPackageMap := buildVulnerablePypiPackageMap(catalog.PypiPackages)
+
+	directories, walkErrors := collectScanDirectories(actionDir, recursive)
+
+	result := actionScanResult{FileErrors: walkErrors}
+	for _, relDir := range directories {
+		// The "not found. Skipping." lines only help for the directory the scan
+		// was pointed at. Repeating them for every subdirectory would bury the
+		// findings in a tree of any size.
+		isRoot := relDir == "."
+		result.merge(scanDirectory(filepath.Join(actionDir, relDir), relDir, vulnerablePackageMap, pypiPackageMap, verbose, isRoot))
+	}
+
+	return result
+}
+
+// collectScanDirectories lists the directories to scan relative to root, with
+// root itself first. Symlinks below root are not followed, so a link pointing
+// back into the tree cannot loop.
+func collectScanDirectories(root string, recursive bool) ([]string, []string) {
+	if !recursive {
+		return []string{"."}, nil
+	}
+
+	// The caller decided root is a directory with os.Stat, which follows
+	// symlinks, but filepath.WalkDir evaluates its root with os.Lstat. Handing
+	// it a symlink would walk nothing at all and report clean, so resolve the
+	// link first. Only the walk uses the resolved path; the directories below
+	// are returned relative to root, so the caller keeps reporting findings
+	// under the path the user asked about. A root that cannot be resolved falls
+	// back to the directory itself rather than to nothing.
+	walkRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return []string{"."}, []string{fmt.Sprintf("failed to resolve %s: %v", root, err)}
+	}
+
+	var directories []string
+	var walkErrors []string
+
+	err = filepath.WalkDir(walkRoot, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			// A directory that cannot be read is reported and stepped over
+			// rather than aborting the walk, so the rest of the tree is still
+			// scanned instead of the whole run collapsing into one error.
+			walkErrors = append(walkErrors, fmt.Sprintf("failed to walk %s: %v", path, err))
+			if entry != nil && entry.IsDir() {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !entry.IsDir() {
+			return nil
+		}
+
+		relPath, relErr := filepath.Rel(walkRoot, path)
+		if relErr != nil {
+			walkErrors = append(walkErrors, fmt.Sprintf("failed to resolve %s: %v", path, relErr))
+			return fs.SkipDir
+		}
+		if relPath != "." && skippedScanDirectories[entry.Name()] {
+			return fs.SkipDir
+		}
+
+		directories = append(directories, relPath)
+		return nil
+	})
+	if err != nil {
+		walkErrors = append(walkErrors, fmt.Sprintf("failed to walk %s: %v", root, err))
+	}
+
+	return directories, walkErrors
+}
+
+// scanDirectory scans the dependency files directly in dir. relDir is the same
+// directory relative to the root of the scan and is used to label findings and
+// progress output; reportMissing controls the "not found. Skipping." lines.
+func scanDirectory(dir, relDir string, vulnerablePackageMap, pypiPackageMap VulnerablePackageMap, verbose, reportMissing bool) actionScanResult {
+	var result actionScanResult
 
 	npmScanners := []struct {
 		filename string
@@ -231,30 +374,31 @@ func scanAction(actionDir string, catalog VulnerabilityCatalog, verbose bool) ac
 	}
 
 	for _, npmScanner := range npmScanners {
-		path := filepath.Join(actionDir, npmScanner.filename)
+		path := filepath.Join(dir, npmScanner.filename)
 		if _, err := os.Stat(path); err != nil {
-			if verbose {
+			if verbose && reportMissing {
 				fmt.Printf("       %s not found. Skipping.\n", npmScanner.filename)
 			}
 			continue
 		}
 
+		relPath := filepath.Join(relDir, npmScanner.filename)
 		if verbose {
-			fmt.Printf("    🔍 Scanning %s...\n", npmScanner.filename)
+			fmt.Printf("    🔍 Scanning %s...\n", relPath)
 		}
 		vulnerabilities, err := npmScanner.scan(path, vulnerablePackageMap)
 		if err != nil {
 			result.FileErrors = append(result.FileErrors, err.Error())
 			if verbose {
-				fmt.Fprintf(os.Stderr, "    Error scanning %s: %v\n", npmScanner.filename, err)
+				fmt.Fprintf(os.Stderr, "    Error scanning %s: %v\n", relPath, err)
 			}
 			continue
 		}
-		result.Vulnerabilities = append(result.Vulnerabilities, vulnerabilities...)
+		result.FilesScanned++
+		result.addVulnerabilities(relPath, vulnerabilities)
 	}
 
-	pythonResult := scanPythonDependencyFiles(actionDir, pypiPackageMap, verbose)
-	result.merge(pythonResult.Vulnerabilities, pythonResult.FileErrors)
+	result.merge(scanPythonDependencyFiles(dir, relDir, pypiPackageMap, verbose, reportMissing))
 
 	return result
 }
@@ -333,33 +477,35 @@ func scanPackageJSONOptimized(path string, vulnerablePackageMap VulnerablePackag
 	return foundVulnerabilities, nil
 }
 
-func scanPythonDependencyFiles(actionDir string, vulnerablePackageMap VulnerablePackageMap, verbose bool) actionScanResult {
+func scanPythonDependencyFiles(dir, relDir string, vulnerablePackageMap VulnerablePackageMap, verbose, reportMissing bool) actionScanResult {
 	var result actionScanResult
 
-	recordError := func(filename string, err error) {
+	recordError := func(name string, err error) {
 		result.FileErrors = append(result.FileErrors, err.Error())
 		if verbose {
-			fmt.Fprintf(os.Stderr, "    Error scanning %s: %v\n", filename, err)
+			fmt.Fprintf(os.Stderr, "    Error scanning %s: %v\n", name, err)
 		}
 	}
 
-	requirementsPaths, err := filepath.Glob(filepath.Join(actionDir, "requirements*.txt"))
+	requirementsPaths, err := filepath.Glob(filepath.Join(dir, "requirements*.txt"))
 	if err != nil {
-		recordError("requirements*.txt", err)
+		recordError(filepath.Join(relDir, "requirements*.txt"), err)
 	}
-	if len(requirementsPaths) == 0 && verbose {
+	if len(requirementsPaths) == 0 && verbose && reportMissing {
 		fmt.Println("       requirements*.txt not found. Skipping.")
 	}
 	for _, path := range requirementsPaths {
+		relPath := filepath.Join(relDir, filepath.Base(path))
 		if verbose {
-			fmt.Printf("    🔍 Scanning %s...\n", filepath.Base(path))
+			fmt.Printf("    🔍 Scanning %s...\n", relPath)
 		}
 		vulnerabilities, err := scanRequirementsTxt(path, vulnerablePackageMap)
 		if err != nil {
-			recordError(filepath.Base(path), err)
+			recordError(relPath, err)
 			continue
 		}
-		result.Vulnerabilities = append(result.Vulnerabilities, vulnerabilities...)
+		result.FilesScanned++
+		result.addVulnerabilities(relPath, vulnerabilities)
 	}
 
 	lockScanners := []struct {
@@ -372,23 +518,25 @@ func scanPythonDependencyFiles(actionDir string, vulnerablePackageMap Vulnerable
 	}
 
 	for _, lockScanner := range lockScanners {
-		path := filepath.Join(actionDir, lockScanner.filename)
+		path := filepath.Join(dir, lockScanner.filename)
 		if _, err := os.Stat(path); err != nil {
-			if verbose {
+			if verbose && reportMissing {
 				fmt.Printf("       %s not found. Skipping.\n", lockScanner.filename)
 			}
 			continue
 		}
 
+		relPath := filepath.Join(relDir, lockScanner.filename)
 		if verbose {
-			fmt.Printf("    🔍 Scanning %s...\n", lockScanner.filename)
+			fmt.Printf("    🔍 Scanning %s...\n", relPath)
 		}
 		vulnerabilities, err := lockScanner.scan(path, vulnerablePackageMap)
 		if err != nil {
-			recordError(lockScanner.filename, err)
+			recordError(relPath, err)
 			continue
 		}
-		result.Vulnerabilities = append(result.Vulnerabilities, vulnerabilities...)
+		result.FilesScanned++
+		result.addVulnerabilities(relPath, vulnerabilities)
 	}
 
 	return result
