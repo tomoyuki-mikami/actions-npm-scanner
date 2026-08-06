@@ -33,7 +33,8 @@ In late 2025, the "Second Coming" NPM contamination campaign was discovered, whi
 - 🔍 **Comprehensive Scanning**: Scans GitHub Actions workflow files (.yml/.yaml)
 - 🚨 **Vulnerability Detection**: Identifies vulnerable NPM and PyPI packages in actions
 - 📦 **Curated Package List**: Contains static NPM/PyPI indicators from Shai-Hulud, Mini Shai-Hulud, and the keyv/cacheable compromise
-- 🧶 **npm Lockfile Coverage**: Scans `package.json`, `package-lock.json`, `yarn.lock`, and `pnpm-lock.yaml` (lockfile v5 through v9)
+- 🧶 **npm Lockfile Coverage**: Scans `package.json`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml` (lockfile v5 through v9), and `bun.lock`
+- 🥟 **Bun Binary Lockfile Reporting**: `bun.lockb` has an undocumented format and is not parsed, so it is reported as a failed file instead of being skipped silently
 - 🐍 **Python Lockfile Coverage**: Scans `requirements*.txt`, `Pipfile.lock`, `poetry.lock`, and `uv.lock`
 - 📂 **Flexible Input**: Supports both single file and directory scanning
 - 💻 **Local Dependency Scanning**: Scans local dependency files or directories with `--local`
@@ -137,6 +138,8 @@ Add `-v` or `--verbose` to show detailed per-action and per-file scan output bef
 
 A dependency file that cannot be parsed is reported as a failed file, and the remaining files in the same directory are still scanned. Failed files are counted as `Files failed` in the summary and their details are written to stderr, so a pipeline that only greps stdout cannot mistake a partial scan for a clean one. Add `--fail-on-error` to exit with status code `2` when the scan reported at least one error. That covers more than `Files failed`: an action that could not be downloaded leaves `Files failed` at zero because none of its files were reached, and it is still counted as an error.
 
+A `bun.lockb` is reported the same way. Bun's binary lockfile format is undocumented, so it is never parsed, and reporting it as a failed file keeps an action whose dependencies were never read from looking clean. A `bun.lockb` sitting next to a `bun.lock` that was read successfully is not reported, because Bun honours the text lockfile and its contents were already scanned. If that `bun.lock` failed to parse, both files are reported: nothing was read, so the binary lockfile is still a gap.
+
 The command scans all requested targets before exiting. If any vulnerability is found, it exits with status code `1`; otherwise it exits with `0`.
 
 ## Sample Output
@@ -172,6 +175,8 @@ Scanning workflow: .github/workflows/ci.yml
     🔍 Scanning package-lock.json...
        yarn.lock not found. Skipping.
        pnpm-lock.yaml not found. Skipping.
+       bun.lock not found. Skipping.
+       bun.lockb not found. Skipping.
     ✅ No vulnerabilities found.
   Scan finished for action actions/checkout@v4.
   Downloading action some-user/vulnerable-action@v1...
@@ -180,6 +185,8 @@ Scanning workflow: .github/workflows/ci.yml
        package-lock.json not found. Skipping.
        yarn.lock not found. Skipping.
        pnpm-lock.yaml not found. Skipping.
+       bun.lock not found. Skipping.
+       bun.lockb not found. Skipping.
     ⚠️ Found vulnerabilities:
       -  Found vulnerable package @ctrl/tinycolor with version 4.1.1 in package.json (dependencies)
   Scan finished for action some-user/vulnerable-action@v1.
@@ -197,7 +204,7 @@ Vulnerability details:
 
 1. **YAML Parsing**: Parses GitHub Actions workflow files to extract action references
 2. **Repository Cloning**: Downloads each referenced action repository using go-git
-3. **Package Analysis**: Searches for npm and Python dependency files
+3. **Package Analysis**: Searches for npm and Python dependency files. `bun.lock` is JSONC, so comments and trailing commas are stripped before it is decoded
 4. **Vulnerability Matching**: Compares found packages against static Shai-Hulud, Mini Shai-Hulud, and keyv/cacheable compromise indicators
 5. **Reporting**: Provides detailed output on any vulnerabilities discovered
 
@@ -286,7 +293,8 @@ Socketのキャンペーンデータには、Go 8モジュール、24 artifacts�
 - 🔍 **包括的スキャン**: GitHub Actionsワークフローファイル(.yml/.yaml)をスキャン
 - 🚨 **脆弱性検出**: アクション内の脆弱なNPM/PyPIパッケージを特定
 - 📦 **厳選されたパッケージリスト**: Shai-Hulud、Mini Shai-Hulud、keyv/cacheable侵害のNPM/PyPI静的IoCを収録
-- 🧶 **npmロックファイル対応**: `package.json`、`package-lock.json`、`yarn.lock`、`pnpm-lock.yaml`（lockfile v5〜v9）をスキャン
+- 🧶 **npmロックファイル対応**: `package.json`、`package-lock.json`、`yarn.lock`、`pnpm-lock.yaml`（lockfile v5〜v9）、`bun.lock`をスキャン
+- 🥟 **Bunバイナリロックファイルの報告**: `bun.lockb`はフォーマットが非公開のため解析せず、黙ってスキップする代わりに失敗ファイルとして報告
 - 🐍 **Pythonロックファイル対応**: `requirements*.txt`、`Pipfile.lock`、`poetry.lock`、`uv.lock`をスキャン
 - 📂 **柔軟な入力**: 単一ファイルとディレクトリスキャンの両方をサポート
 - 💻 **ローカル依存ファイルスキャン**: `--local`でローカルの依存ファイルまたはディレクトリをスキャン
@@ -384,13 +392,15 @@ jobs:
 
 解析できなかった依存ファイルは失敗ファイルとして記録され、同じディレクトリの残りのファイルはそのままスキャンされます。失敗したファイル数はサマリの`Files failed`に表示され、詳細はstderrに出力されます。これにより、stdoutをgrepするだけの自動化が部分的なスキャン結果をcleanと取り違えることを防げます。エラーが1件以上あった場合に終了コード`2`で終了させるには`--fail-on-error`を付けてください。対象は`Files failed`より広く、ダウンロードできなかったアクションはファイルに到達していないため`Files failed`が0のままですが、エラーとしては計上されます。
 
+`bun.lockb`も同じ扱いです。Bunのバイナリロックファイルはフォーマットが非公開のため解析せず、失敗ファイルとして報告することで、依存関係を一度も読めていないアクションがcleanに見えるのを防ぎます。ただし解析に成功した`bun.lock`が併存している場合は報告しません。Bun自身が優先するのはテキスト側であり、その中身はすでにスキャン済みだからです。その`bun.lock`の解析が失敗した場合は両方を報告します。何も読めていない以上、バイナリ側は依然として穴だからです。
+
 コマンドは対象を最後までスキャンしてから終了します。脆弱性が1件以上見つかった場合は終了コード`1`、見つからない場合は`0`で終了します。
 
 ## 動作原理
 
 1. **YAML解析**: GitHub Actionsワークフローファイルを解析してアクション参照を抽出
 2. **リポジトリクローン**: go-gitを使用して各参照されたアクションリポジトリをダウンロード
-3. **パッケージ分析**: npmとPythonの依存関係ファイルを検索
+3. **パッケージ分析**: npmとPythonの依存関係ファイルを検索。`bun.lock`はJSONCのため、コメントと末尾カンマを除去してからデコード
 4. **脆弱性マッチング**: 発見されたパッケージをShai-Hulud、Mini Shai-Hulud、keyv/cacheable侵害の静的IoCカタログと比較
 5. **レポート**: 発見された脆弱性について詳細な出力を提供
 

@@ -228,7 +228,13 @@ func scanAction(actionDir string, catalog VulnerabilityCatalog, verbose bool) ac
 		{"package-lock.json", scanPackageLockJSONOptimized},
 		{"yarn.lock", scanYarnLockOptimized},
 		{"pnpm-lock.yaml", scanPnpmLockOptimized},
+		{bunLockfileName, scanBunLockOptimized},
 	}
+
+	// Whether bun.lock was both present and read successfully. Only then are its
+	// dependencies actually covered, which is what decides how a bun.lockb next
+	// to it is treated below.
+	bunLockScanned := false
 
 	for _, npmScanner := range npmScanners {
 		path := filepath.Join(actionDir, npmScanner.filename)
@@ -250,13 +256,51 @@ func scanAction(actionDir string, catalog VulnerabilityCatalog, verbose bool) ac
 			}
 			continue
 		}
+		if npmScanner.filename == bunLockfileName {
+			bunLockScanned = true
+		}
 		result.Vulnerabilities = append(result.Vulnerabilities, vulnerabilities...)
 	}
+
+	result.merge(nil, scanBunBinaryLockfile(actionDir, bunLockScanned, verbose))
 
 	pythonResult := scanPythonDependencyFiles(actionDir, pypiPackageMap, verbose)
 	result.merge(pythonResult.Vulnerabilities, pythonResult.FileErrors)
 
 	return result
+}
+
+// scanBunBinaryLockfile reports bun.lockb as an unreadable file instead of
+// skipping it. The binary format is undocumented, so the lockfile is never
+// parsed; staying silent about it would be indistinguishable from a clean scan
+// of an action whose dependencies were never actually read.
+//
+// A bun.lockb next to a bun.lock that was read successfully is not reported:
+// from Bun 1.2 onwards the text lockfile is the one Bun itself honours, so the
+// dependencies were already scanned and the leftover binary file is not a
+// coverage gap. A bun.lock that failed to parse suppresses nothing, because then
+// no dependency of the action was read at all.
+func scanBunBinaryLockfile(actionDir string, bunLockScanned bool, verbose bool) []string {
+	path := filepath.Join(actionDir, bunBinaryLockfileName)
+	if _, err := os.Stat(path); err != nil {
+		if verbose {
+			fmt.Printf("       %s not found. Skipping.\n", bunBinaryLockfileName)
+		}
+		return nil
+	}
+
+	if bunLockScanned {
+		if verbose {
+			fmt.Printf("       %s found alongside a scanned %s. Skipping the binary lockfile.\n", bunBinaryLockfileName, bunLockfileName)
+		}
+		return nil
+	}
+
+	err := bunBinaryLockfileError(path)
+	if verbose {
+		fmt.Fprintf(os.Stderr, "    Error scanning %s: %v\n", bunBinaryLockfileName, err)
+	}
+	return []string{err.Error()}
 }
 
 func scanDependencyFile(path string, vulnerablePackageMap, pypiPackageMap VulnerablePackageMap) ([]string, error) {
@@ -276,6 +320,10 @@ func scanDependencyFile(path string, vulnerablePackageMap, pypiPackageMap Vulner
 		return scanYarnLockOptimized(path, vulnerablePackageMap)
 	case "pnpm-lock.yaml":
 		return scanPnpmLockOptimized(path, vulnerablePackageMap)
+	case bunLockfileName:
+		return scanBunLockOptimized(path, vulnerablePackageMap)
+	case bunBinaryLockfileName:
+		return nil, bunBinaryLockfileError(path)
 	case "Pipfile.lock":
 		return scanPipfileLock(path, pypiPackageMap)
 	case "poetry.lock", "uv.lock":
@@ -1145,6 +1193,233 @@ func cleanPnpmVersion(version string) string {
 		return ""
 	}
 	return version
+}
+
+const (
+	// bunLockfileName is the text lockfile Bun writes by default since 1.2.
+	bunLockfileName = "bun.lock"
+	// bunBinaryLockfileName is Bun's older binary lockfile.
+	bunBinaryLockfileName = "bun.lockb"
+	// maxKnownBunLockfileVersion is the highest bun.lock "lockfileVersion" this
+	// scanner has been checked against; Bun 1.3 writes 1. A lower number is an
+	// older lockfile and still readable, but a higher one may lay out "packages"
+	// in a way this parser cannot see, and decoding it anyway would report an
+	// action as clean while none of its dependencies were understood.
+	maxKnownBunLockfileVersion = 1
+)
+
+// BunLock represents the structure of bun.lock.
+//
+// Every value in "packages" is an array whose shape depends on how the
+// dependency was resolved: a registry package is
+// ["name@version", "<registry>", {metadata}, "<integrity>"], a git dependency
+// carries the metadata object in second position, a tarball dependency has
+// three elements and a workspace package only one. The first element is the
+// only one that is always present and always a string, so the entries are kept
+// as raw JSON and only that element is decoded.
+type BunLock struct {
+	LockfileVersion int                          `json:"lockfileVersion"`
+	Packages        map[string][]json.RawMessage `json:"packages,omitempty"`
+}
+
+// bunBinaryLockfileError reports that bun.lockb was found but deliberately not
+// parsed. The format is undocumented and carries no stability guarantee, so the
+// scanner says so instead of letting the action look clean.
+func bunBinaryLockfileError(path string) error {
+	return fmt.Errorf("failed to scan %s: bun.lockb is Bun's binary lockfile and its format is undocumented, so it is not parsed; run \"bun install --save-text-lockfile\" to produce a bun.lock and scan that instead", path)
+}
+
+// stripJSONC removes comments and trailing commas from JSONC so that
+// encoding/json can decode it. bun.lock is JSONC: Bun writes a trailing comma
+// after the last entry of every object and accepts hand-written comments.
+//
+// The scan is string-aware. Comment markers only start a comment outside of a
+// string literal, because bun.lock entries routinely embed "//" inside strings
+// — a tarball dependency is recorded as
+// "left-pad@https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz", and a
+// custom registry is stored as a URL as well. Cutting at the first "//" would
+// truncate those strings and corrupt the document.
+func stripJSONC(data []byte) []byte {
+	stripped := make([]byte, 0, len(data))
+	inString := false
+
+	for i := 0; i < len(data); i++ {
+		char := data[i]
+
+		if inString {
+			stripped = append(stripped, char)
+			switch char {
+			case '\\':
+				// Copy the escaped byte verbatim so that an escaped quote does
+				// not end the string.
+				if i+1 < len(data) {
+					i++
+					stripped = append(stripped, data[i])
+				}
+			case '"':
+				inString = false
+			}
+			continue
+		}
+
+		switch {
+		case char == '"':
+			inString = true
+			stripped = append(stripped, char)
+		case char == '/' && i+1 < len(data) && data[i+1] == '/':
+			// Line comment: drop everything up to, but not including, the
+			// newline so that the remaining line structure is preserved.
+			for i+1 < len(data) && data[i+1] != '\n' {
+				i++
+			}
+		case char == '/' && i+1 < len(data) && data[i+1] == '*':
+			// Block comment: drop everything through the closing "*/", leaving a
+			// space so that the tokens on either side stay separated. An
+			// unterminated block comment consumes the rest of the input and is
+			// left for encoding/json to report as invalid JSON.
+			i += 2
+			for i+1 < len(data) && !(data[i] == '*' && data[i+1] == '/') {
+				i++
+			}
+			i++
+			stripped = append(stripped, ' ')
+		case char == '}' || char == ']':
+			stripped = trimTrailingComma(stripped)
+			stripped = append(stripped, char)
+		default:
+			stripped = append(stripped, char)
+		}
+	}
+
+	return stripped
+}
+
+// trimTrailingComma removes a comma that only whitespace separates from the end
+// of the output, which is what a trailing comma looks like once the closing
+// brace or bracket is reached. A comma inside a string literal can never be in
+// that position: the closing quote always follows it.
+func trimTrailingComma(stripped []byte) []byte {
+	end := len(stripped)
+	for end > 0 && isJSONWhitespace(stripped[end-1]) {
+		end--
+	}
+	if end > 0 && stripped[end-1] == ',' {
+		return append(stripped[:end-1], stripped[end:]...)
+	}
+	return stripped
+}
+
+func isJSONWhitespace(char byte) bool {
+	return char == ' ' || char == '\t' || char == '\r' || char == '\n'
+}
+
+// splitBunPackageDescriptor splits a bun.lock descriptor into a package name
+// and a version.
+//
+//	"lodash@4.17.19"          -> "lodash", "4.17.19"
+//	"@ctrl/tinycolor@4.1.1"   -> "@ctrl/tinycolor", "4.1.1"
+//	"@probe/app@workspace:.." -> "@probe/app", "workspace:.."
+//
+// An npm package name only ever contains "@" as the scope prefix, so the
+// separator is the first "@" after position zero. Using the last "@" instead
+// would mis-split a tarball dependency whose URL carries userinfo.
+func splitBunPackageDescriptor(descriptor string) (string, string) {
+	descriptor = strings.TrimSpace(descriptor)
+	if descriptor == "" {
+		return "", ""
+	}
+
+	start := 0
+	if strings.HasPrefix(descriptor, "@") {
+		start = 1
+	}
+
+	separator := strings.Index(descriptor[start:], "@")
+	if separator == -1 {
+		return descriptor, ""
+	}
+	separator += start
+
+	return descriptor[:separator], descriptor[separator+1:]
+}
+
+// bunPackageEntry is a package name/version pair resolved from a bun lockfile
+type bunPackageEntry struct {
+	name    string
+	version string
+}
+
+func readBunLockEntries(path string) ([]bunPackageEntry, error) {
+	data, err := ioutil.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read %s: %w", path, err)
+	}
+
+	var bunLock BunLock
+	if err := json.Unmarshal(stripJSONC(data), &bunLock); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal %s: %w", path, err)
+	}
+
+	// Both checks below guard against the same failure: a future bun.lock that
+	// still decodes cleanly into this struct but keeps its dependencies somewhere
+	// this parser does not look. That would produce zero entries and no error,
+	// which is exactly the false clean the scanner exists to prevent. Bun deletes
+	// the lockfile outright when a project has no packages, so an existing
+	// bun.lock always carries a "packages" object.
+	if bunLock.LockfileVersion > maxKnownBunLockfileVersion {
+		return nil, fmt.Errorf("failed to scan %s: lockfileVersion %d is newer than the supported version %d, so its dependencies were not read", path, bunLock.LockfileVersion, maxKnownBunLockfileVersion)
+	}
+	if bunLock.Packages == nil {
+		return nil, fmt.Errorf("failed to scan %s: no \"packages\" object, so its dependencies were not read", path)
+	}
+
+	var entries []bunPackageEntry
+	seen := make(map[bunPackageEntry]bool)
+
+	// The map key is an install path rather than a package name — a second copy
+	// of a dependency is keyed "chalk/supports-color" — so the name and version
+	// are always taken from the descriptor instead.
+	for _, entry := range bunLock.Packages {
+		if len(entry) == 0 {
+			continue
+		}
+
+		var descriptor string
+		if err := json.Unmarshal(entry[0], &descriptor); err != nil {
+			// Not a "name@version" string; nothing to match against.
+			continue
+		}
+
+		name, version := splitBunPackageDescriptor(descriptor)
+		if name == "" || version == "" {
+			continue
+		}
+
+		packageEntry := bunPackageEntry{name: name, version: version}
+		if seen[packageEntry] {
+			continue
+		}
+		seen[packageEntry] = true
+		entries = append(entries, packageEntry)
+	}
+
+	return entries, nil
+}
+
+func scanBunLockOptimized(path string, vulnerablePackageMap VulnerablePackageMap) ([]string, error) {
+	entries, err := readBunLockEntries(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var foundVulnerabilities []string
+	for _, entry := range entries {
+		if isVuln, vulnerablePackage := vulnerablePackageMap.isVulnerable(entry.name, entry.version); isVuln {
+			foundVulnerabilities = append(foundVulnerabilities, formatVulnerabilityMessage(entry.name, entry.version, filepath.Base(path), vulnerablePackage))
+		}
+	}
+
+	return foundVulnerabilities, nil
 }
 
 func scanPackageLockJSONOptimized(path string, vulnerablePackageMap VulnerablePackageMap) ([]string, error) {

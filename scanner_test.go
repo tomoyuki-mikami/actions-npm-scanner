@@ -224,6 +224,430 @@ func TestScanActionKeepsFindingsWhenDependencyFileFails(t *testing.T) {
 	assertVulnerabilityReported(t, vulnerabilities, "@ctrl/tinycolor", "4.1.1", "package.json (dependencies)")
 }
 
+// bun.lock is JSONC: Bun writes a trailing comma after the last entry of every
+// object, and the resolved version lives in the descriptor at the head of each
+// package array rather than in the map key.
+func TestScanActionWithBunLock(t *testing.T) {
+	tmpDir, err := ioutil.TempDir("", "action-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	bunLock := `{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "action",
+      "dependencies": {
+        "@ctrl/tinycolor": "^4.1.0",
+        "chalk": "5.3.0",
+      },
+    },
+  },
+  "packages": {
+    "@ctrl/tinycolor": ["@ctrl/tinycolor@4.1.1", "", {}, "sha512-kzyuwO"],
+
+    "chalk": ["chalk@5.3.0", "", {}, "sha512-dLitG7"],
+
+    "chalk/supports-color": ["supports-color@7.2.0", "", { "dependencies": { "has-flag": "^4.0.0" } }, "sha512-qpCAvR"],
+  }
+}
+`
+
+	if err := ioutil.WriteFile(filepath.Join(tmpDir, "bun.lock"), []byte(bunLock), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	vulnerablePackages := []VulnerablePackage{
+		{Name: "@ctrl/tinycolor", Versions: []string{"4.1.1"}},
+		{Name: "supports-color", Versions: []string{"7.2.0"}},
+	}
+
+	vulnerabilities, err := ScanAction(tmpDir, testNpmCatalog(vulnerablePackages))
+	if err != nil {
+		t.Fatalf("ScanAction() error = %v", err)
+	}
+
+	// The scoped name survives the "name@version" split, and the transitive
+	// entry is reported under the package name from its descriptor rather than
+	// under the "chalk/supports-color" install path used as the map key.
+	assertVulnerabilityReported(t, vulnerabilities, "@ctrl/tinycolor", "4.1.1", "bun.lock")
+	assertVulnerabilityReported(t, vulnerabilities, "supports-color", "7.2.0", "bun.lock")
+
+	if len(vulnerabilities) != 2 {
+		t.Errorf("expected 2 vulnerabilities, got %d: %v", len(vulnerabilities), vulnerabilities)
+	}
+}
+
+// A tarball dependency embeds a URL in its descriptor and a custom registry is
+// recorded as a URL too, so "//" appears inside string literals throughout a
+// real bun.lock. Treating those as comment markers would truncate the strings
+// and leave the rest of the document unparsable.
+func TestScanActionWithBunLockKeepsSlashesInsideStrings(t *testing.T) {
+	tmpDir, err := ioutil.TempDir("", "action-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	bunLock := `{
+  "lockfileVersion": 1,
+  "packages": {
+    "left-pad": ["left-pad@https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz", {}, "sha512-XI5MPz"],
+
+    "@ctrl/tinycolor": ["@ctrl/tinycolor@4.1.1", "https://registry.npmjs.org/", {}, "sha512-kzyuwO"],
+  }
+}
+`
+
+	if err := ioutil.WriteFile(filepath.Join(tmpDir, "bun.lock"), []byte(bunLock), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	vulnerablePackages := []VulnerablePackage{
+		{Name: "@ctrl/tinycolor", Versions: []string{"4.1.1"}},
+	}
+
+	vulnerabilities, err := ScanAction(tmpDir, testNpmCatalog(vulnerablePackages))
+	if err != nil {
+		t.Fatalf("ScanAction() error = %v", err)
+	}
+
+	assertVulnerabilityReported(t, vulnerabilities, "@ctrl/tinycolor", "4.1.1", "bun.lock")
+}
+
+func TestStripJSONC(t *testing.T) {
+	testCases := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "line comment is removed and the newline kept",
+			input:    "{\n  // a comment\n  \"a\": 1\n}",
+			expected: "{\n  \n  \"a\": 1\n}",
+		},
+		{
+			name:     "block comment is replaced by a separator",
+			input:    `{"a": /* note */ 1}`,
+			expected: `{"a":   1}`,
+		},
+		{
+			name:     "trailing comma before a brace is removed",
+			input:    "{\n  \"a\": 1,\n}",
+			expected: "{\n  \"a\": 1\n}",
+		},
+		{
+			name:     "trailing comma before a bracket is removed",
+			input:    `["a", "b",]`,
+			expected: `["a", "b"]`,
+		},
+		{
+			name:     "double slash inside a string is preserved",
+			input:    `{"url": "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"}`,
+			expected: `{"url": "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"}`,
+		},
+		{
+			name:     "block comment opener inside a string is preserved",
+			input:    `{"glob": "packages/*", "other": "a /* not a comment */ b"}`,
+			expected: `{"glob": "packages/*", "other": "a /* not a comment */ b"}`,
+		},
+		{
+			name:     "escaped quote does not end the string",
+			input:    `{"a": "say \" // still a string"}`,
+			expected: `{"a": "say \" // still a string"}`,
+		},
+		{
+			name:     "comma inside a string is not treated as a trailing comma",
+			input:    `{"a": "x,"}`,
+			expected: `{"a": "x,"}`,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := string(stripJSONC([]byte(testCase.input))); got != testCase.expected {
+				t.Errorf("stripJSONC() = %q, want %q", got, testCase.expected)
+			}
+		})
+	}
+}
+
+func TestSplitBunPackageDescriptor(t *testing.T) {
+	testCases := []struct {
+		descriptor string
+		name       string
+		version    string
+	}{
+		{"lodash@4.17.19", "lodash", "4.17.19"},
+		{"@ctrl/tinycolor@4.1.1", "@ctrl/tinycolor", "4.1.1"},
+		{"@probe/app@workspace:pkgs/app", "@probe/app", "workspace:pkgs/app"},
+		{"is-number@github:jonschlinkert/is-number#98e8ff1", "is-number", "github:jonschlinkert/is-number#98e8ff1"},
+		// The last "@" would land inside the userinfo of the URL.
+		{"left-pad@https://user@host/left-pad-1.3.0.tgz", "left-pad", "https://user@host/left-pad-1.3.0.tgz"},
+		{"lodash", "lodash", ""},
+		{"", "", ""},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.descriptor, func(t *testing.T) {
+			name, version := splitBunPackageDescriptor(testCase.descriptor)
+			if name != testCase.name || version != testCase.version {
+				t.Errorf("splitBunPackageDescriptor(%q) = (%q, %q), want (%q, %q)", testCase.descriptor, name, version, testCase.name, testCase.version)
+			}
+		})
+	}
+}
+
+// bun.lockb is never parsed, so it has to be reported as an unreadable file.
+// Skipping it silently would make an unscanned action look clean.
+func TestScanActionReportsBunBinaryLockfile(t *testing.T) {
+	tmpDir, err := ioutil.TempDir("", "action-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	packageJSON := `{
+	  "dependencies": {
+	    "@ctrl/tinycolor": "4.1.1"
+	  }
+	}`
+
+	if err := ioutil.WriteFile(filepath.Join(tmpDir, "package.json"), []byte(packageJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The first bytes of a lockfile written by "bun install" without
+	// saveTextLockfile. The content is never read; only its presence matters.
+	bunLockb := append([]byte("#!/usr/bin/env bun\nbun-lockfile-format-v0\n"), 0x00, 0x01, 0x02, 0xff)
+	if err := ioutil.WriteFile(filepath.Join(tmpDir, "bun.lockb"), bunLockb, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := scanAction(tmpDir, testNpmCatalog([]VulnerablePackage{
+		{Name: "@ctrl/tinycolor", Versions: []string{"4.1.1"}},
+	}), false)
+
+	if len(result.FileErrors) != 1 {
+		t.Fatalf("expected 1 file error, got %d: %v", len(result.FileErrors), result.FileErrors)
+	}
+	if !strings.Contains(result.FileErrors[0], "bun.lockb") {
+		t.Errorf("expected the file error to name bun.lockb, got %q", result.FileErrors[0])
+	}
+
+	// The rest of the directory is still scanned.
+	assertVulnerabilityReported(t, result.Vulnerabilities, "@ctrl/tinycolor", "4.1.1", "package.json (dependencies)")
+}
+
+// From Bun 1.2 onwards bun.lock is the lockfile Bun honours, so a leftover
+// bun.lockb beside it is not a coverage gap and must not be reported.
+func TestScanActionIgnoresBunBinaryLockfileBesideBunLock(t *testing.T) {
+	tmpDir, err := ioutil.TempDir("", "action-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	bunLock := `{
+  "lockfileVersion": 1,
+  "packages": {
+    "@ctrl/tinycolor": ["@ctrl/tinycolor@4.1.1", "", {}, "sha512-kzyuwO"],
+  }
+}
+`
+	if err := ioutil.WriteFile(filepath.Join(tmpDir, "bun.lock"), []byte(bunLock), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ioutil.WriteFile(filepath.Join(tmpDir, "bun.lockb"), []byte("#!/usr/bin/env bun\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := scanAction(tmpDir, testNpmCatalog([]VulnerablePackage{
+		{Name: "@ctrl/tinycolor", Versions: []string{"4.1.1"}},
+	}), false)
+
+	if len(result.FileErrors) != 0 {
+		t.Errorf("expected no file errors, got %v", result.FileErrors)
+	}
+	assertVulnerabilityReported(t, result.Vulnerabilities, "@ctrl/tinycolor", "4.1.1", "bun.lock")
+}
+
+// A bun.lock that cannot be parsed covers nothing, so the bun.lockb beside it is
+// still the only remaining record of the dependencies and has to be reported.
+func TestScanActionReportsBunBinaryLockfileWhenBunLockFails(t *testing.T) {
+	tmpDir, err := ioutil.TempDir("", "action-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Truncated mid-entry, as a lockfile from an interrupted write would be.
+	brokenBunLock := `{
+  "lockfileVersion": 1,
+  "packages": {
+    "@ctrl/tinycolor": ["@ctrl/tinycolor@4.1.1", "", {}, "sha512-kzyuwO"`
+	if err := ioutil.WriteFile(filepath.Join(tmpDir, "bun.lock"), []byte(brokenBunLock), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ioutil.WriteFile(filepath.Join(tmpDir, "bun.lockb"), []byte("#!/usr/bin/env bun\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := scanAction(tmpDir, testNpmCatalog([]VulnerablePackage{
+		{Name: "@ctrl/tinycolor", Versions: []string{"4.1.1"}},
+	}), false)
+
+	if len(result.FileErrors) != 2 {
+		t.Fatalf("expected 2 file errors, got %d: %v", len(result.FileErrors), result.FileErrors)
+	}
+	joined := strings.Join(result.FileErrors, "; ")
+	// "bun.lock:" only matches the text lockfile; the binary one reads
+	// "bun.lockb:".
+	if !strings.Contains(joined, "bun.lock:") {
+		t.Errorf("expected a file error for bun.lock, got %q", joined)
+	}
+	if !strings.Contains(joined, "bun.lockb") {
+		t.Errorf("expected a file error for bun.lockb, got %q", joined)
+	}
+}
+
+// A bun.lock whose dependencies this parser cannot see must fail loudly. Both
+// shapes decode into BunLock without error, so without the checks they would be
+// reported as an action with no dependencies at all.
+func TestScanBunLockRejectsUnreadableStructures(t *testing.T) {
+	testCases := []struct {
+		name    string
+		bunLock string
+		wantErr string
+	}{
+		{
+			name: "lockfileVersion newer than the supported one",
+			bunLock: `{
+  "lockfileVersion": 2,
+  "packages": {
+    "@ctrl/tinycolor": ["@ctrl/tinycolor@4.1.1", "", {}, "sha512-kzyuwO"],
+  }
+}
+`,
+			wantErr: "lockfileVersion 2",
+		},
+		{
+			name: "packages renamed or absent",
+			bunLock: `{
+  "lockfileVersion": 1,
+  "modules": {
+    "@ctrl/tinycolor": ["@ctrl/tinycolor@4.1.1", "", {}, "sha512-kzyuwO"],
+  }
+}
+`,
+			wantErr: "no \"packages\" object",
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			tmpDir, err := ioutil.TempDir("", "action-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer os.RemoveAll(tmpDir)
+
+			path := filepath.Join(tmpDir, "bun.lock")
+			if err := ioutil.WriteFile(path, []byte(testCase.bunLock), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			vulnerablePackageMap := buildVulnerablePackageMap([]VulnerablePackage{
+				{Name: "@ctrl/tinycolor", Versions: []string{"4.1.1"}},
+			})
+
+			_, err = scanBunLockOptimized(path, vulnerablePackageMap)
+			if err == nil {
+				t.Fatal("expected scanBunLockOptimized() to report the lockfile as unreadable")
+			}
+			if !strings.Contains(err.Error(), testCase.wantErr) {
+				t.Errorf("expected the error to mention %q, got %q", testCase.wantErr, err)
+			}
+		})
+	}
+}
+
+// Bun records the real package name and version in the descriptor for an npm
+// alias and keeps the alias only as the map key, so reading the descriptor
+// rather than the key is what makes an aliased compromised package visible.
+func TestScanActionWithBunLockAliasedDependency(t *testing.T) {
+	tmpDir, err := ioutil.TempDir("", "action-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Written by "bun install" for {"tc": "npm:@ctrl/tinycolor@4.1.1"}.
+	bunLock := `{
+  "lockfileVersion": 1,
+  "packages": {
+    "tc": ["@ctrl/tinycolor@4.1.1", "", {}, "sha512-kzyuwO"],
+  }
+}
+`
+	if err := ioutil.WriteFile(filepath.Join(tmpDir, "bun.lock"), []byte(bunLock), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	vulnerabilities, err := ScanAction(tmpDir, testNpmCatalog([]VulnerablePackage{
+		{Name: "@ctrl/tinycolor", Versions: []string{"4.1.1"}},
+	}))
+	if err != nil {
+		t.Fatalf("ScanAction() error = %v", err)
+	}
+
+	assertVulnerabilityReported(t, vulnerabilities, "@ctrl/tinycolor", "4.1.1", "bun.lock")
+}
+
+func TestScanDependencyFileBunLockfiles(t *testing.T) {
+	tmpDir, err := ioutil.TempDir("", "action-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	vulnerablePackageMap := buildVulnerablePackageMap([]VulnerablePackage{
+		{Name: "@ctrl/tinycolor", Versions: []string{"4.1.1"}},
+	})
+	pypiPackageMap := buildVulnerablePypiPackageMap(nil)
+
+	bunLockPath := filepath.Join(tmpDir, "bun.lock")
+	bunLock := `{
+  "lockfileVersion": 1,
+  "packages": {
+    "@ctrl/tinycolor": ["@ctrl/tinycolor@4.1.1", "", {}, "sha512-kzyuwO"],
+  }
+}
+`
+	if err := ioutil.WriteFile(bunLockPath, []byte(bunLock), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	vulnerabilities, err := scanDependencyFile(bunLockPath, vulnerablePackageMap, pypiPackageMap)
+	if err != nil {
+		t.Fatalf("scanDependencyFile() error = %v", err)
+	}
+	assertVulnerabilityReported(t, vulnerabilities, "@ctrl/tinycolor", "4.1.1", "bun.lock")
+
+	// Scanning bun.lockb directly must fail loudly rather than report nothing.
+	bunLockbPath := filepath.Join(tmpDir, "bun.lockb")
+	if err := ioutil.WriteFile(bunLockbPath, []byte("#!/usr/bin/env bun\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := scanDependencyFile(bunLockbPath, vulnerablePackageMap, pypiPackageMap); err == nil {
+		t.Error("expected scanDependencyFile() to report bun.lockb as unreadable")
+	}
+}
+
 func assertVulnerabilityReported(t *testing.T, vulnerabilities []string, pkgName, version, filename string) {
 	t.Helper()
 	expected := fmt.Sprintf("Found vulnerable package %s with version %s in %s", pkgName, version, filename)

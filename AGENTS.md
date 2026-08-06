@@ -49,7 +49,7 @@ git ls-remote origin refs/heads/main refs/tags/vX.Y.Z refs/tags/vX.Y.Z^{}
 - **main.go**: CLIエントリーポイント。コマンドライン引数を処理し、全体の処理を協調させる
 - **parser.go**: GitHub Actionsワークフロー（YAML）の解析とアクション抽出
 - **github.go**: GitHubからアクションリポジトリのダウンロード（go-git使用）
-- **scanner.go**: 複数のパッケージマネージャ（npm、yarn、pnpm、PyPI）の依存ファイルでの脆弱パッケージ検出。ハッシュマップ最適化、resolvedフィールドからの正確なNPMバージョン抽出、Python requirements範囲指定の検出を含む
+- **scanner.go**: 複数のパッケージマネージャ（npm、yarn、pnpm、Bun、PyPI）の依存ファイルでの脆弱パッケージ検出。ハッシュマップ最適化、resolvedフィールドからの正確なNPMバージョン抽出、bun.lockのJSONC除去、Python requirements範囲指定の検出を含む
 - **vulnerable_packages.go**: Shai-Hulud / Mini Shai-Hulud攻撃で侵害されたパッケージの静的カタログ。NPM/PyPIを`VulnerabilityCatalog`で分離する
 - **docs/adr/**: アーキテクチャ上の判断記録。新しい検査対象・カタログ構造・大きな設計判断を追加する場合はADRを確認/更新する
 
@@ -62,6 +62,8 @@ git ls-remote origin refs/heads/main refs/tags/vX.Y.Z refs/tags/vX.Y.Z^{}
    - package-lock.json（npm v1/v2/v3対応、resolvedフィールドからの正確なバージョン抽出）
    - yarn.lock（yarn）
    - pnpm-lock.yaml（pnpm）
+   - bun.lock（Bun 1.2以降のテキストロックファイル。JSONCのためコメントと末尾カンマを除去してから解析）
+   - bun.lockb（Bunのバイナリロックファイル。フォーマット非公開のため解析せず、失敗ファイルとして報告。解析に成功したbun.lockが併存する場合のみ報告しない）
    - requirements*.txt（PyPI、範囲指定の可能性検出を含む）
    - Pipfile.lock（PyPI）
    - poetry.lock（PyPI）
@@ -76,7 +78,7 @@ git ls-remote origin refs/heads/main refs/tags/vX.Y.Z refs/tags/vX.Y.Z^{}
 - `VulnerabilityCatalog`: エコシステム別の脆弱パッケージカタログ（NpmPackages, PypiPackages）
 - `VulnerablePackageMap`: パフォーマンス最適化のためのハッシュマップ型
 - `Workflow`: GitHubワークフロー構造
-- `PackageJSON`, `PackageLockJSON`, `PnpmLock`: 各パッケージマネージャのファイル構造
+- `PackageJSON`, `PackageLockJSON`, `PnpmLock`, `BunLock`: 各パッケージマネージャのファイル構造
 
 ## テストサンプル
 
@@ -104,6 +106,15 @@ git ls-remote origin refs/heads/main refs/tags/vX.Y.Z refs/tags/vX.Y.Z^{}
 - ハッシュマップ最適化のテスト
 - 複数パッケージマネージャの統合テスト
 - Mini Shai-HuludのNPM/PyPI IoC検出テスト
+
+### Bunロックファイル対応
+- `bun.lock`をスキャン対象に追加。JSONCのため、文字列を認識する除去処理でコメントと末尾カンマを取り除いてから`encoding/json`でデコードする（`stripJSONC`）
+- tarball依存は`left-pad@https://registry.npmjs.org/...`のように記録され、文字列中に`//`が日常的に現れる。除去処理を文字列非対応にすると文書が壊れるため、正規表現による置換は使わない
+- パッケージ名とバージョンは、マップのキー（`chalk/supports-color`のようなインストールパス）ではなく各エントリ先頭のdescriptorから取得する。エントリの配列は解決方法ごとに要素数と型が変わるため、先頭以外は`json.RawMessage`のまま保持する
+- descriptorの分割位置は先頭以外の最初の`@`。スコープ付き名（`@ctrl/tinycolor@4.1.1`）と、userinfoを含むtarball URLの両方を正しく扱うため
+- npm alias（`"tc": "npm:@ctrl/tinycolor@3.6.1"`）はキー側にalias名、descriptor側に実パッケージ名とバージョンが入る。descriptorから取ることでalias経由の侵害パッケージも検出できる
+- 未知の`lockfileVersion`（`maxKnownBunLockfileVersion`超）と`packages`欠落は解析エラーにする。どちらも構造体へのデコードは成功してしまい、放置すると「0件・エラーなし」のfalse cleanになるため
+- `bun.lockb`は解析せず、`actionScanResult.FileErrors`経由で失敗ファイルとして報告する。抑止するのは`bun.lock`の解析が成功したときだけで、存在だけでは抑止しない。詳細は`docs/adr/2026-08-06-scan-bun-text-lockfile-and-report-binary-lockfile.md`
 
 ### Mini Shai-Hulud対応
 - 2026年5月12日時点でSocketが追跡するMini Shai-Hulud NPM 405 artifactsを静的カタログに追加
