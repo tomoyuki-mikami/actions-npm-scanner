@@ -242,11 +242,12 @@ func runLocalScan(path string, vulnerabilityCatalog VulnerabilityCatalog, verbos
 	}
 	for _, vulnerability := range scanResult.Vulnerabilities {
 		target := path
-		if fileInfo.IsDir() {
-			// Point at the dependency file itself rather than at the directory
-			// the scan started from, so a finding in a subdirectory is
-			// traceable to the file it came from.
-			target = filepath.Join(path, vulnerability.Path)
+		if directory := vulnerability.Directory(); fileInfo.IsDir() && directory != "" {
+			// Point at the subdirectory the finding came from rather than at
+			// the directory the scan started in. The message already names the
+			// dependency file, and a finding at the root keeps the scanned path
+			// as its target exactly as before.
+			target = filepath.Join(path, directory)
 		}
 		summary.Vulnerabilities = append(summary.Vulnerabilities, ScanFinding{
 			Target:  target,

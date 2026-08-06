@@ -301,17 +301,29 @@ func scanAction(actionDir string, catalog VulnerabilityCatalog, verbose, recursi
 }
 
 // collectScanDirectories lists the directories to scan relative to root, with
-// root itself first. Symlinks are not followed, so a link pointing back into
-// the tree cannot loop.
+// root itself first. Symlinks below root are not followed, so a link pointing
+// back into the tree cannot loop.
 func collectScanDirectories(root string, recursive bool) ([]string, []string) {
 	if !recursive {
 		return []string{"."}, nil
 	}
 
+	// The caller decided root is a directory with os.Stat, which follows
+	// symlinks, but filepath.WalkDir evaluates its root with os.Lstat. Handing
+	// it a symlink would walk nothing at all and report clean, so resolve the
+	// link first. Only the walk uses the resolved path; the directories below
+	// are returned relative to root, so the caller keeps reporting findings
+	// under the path the user asked about. A root that cannot be resolved falls
+	// back to the directory itself rather than to nothing.
+	walkRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return []string{"."}, []string{fmt.Sprintf("failed to resolve %s: %v", root, err)}
+	}
+
 	var directories []string
 	var walkErrors []string
 
-	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+	err = filepath.WalkDir(walkRoot, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			// A directory that cannot be read is reported and stepped over
 			// rather than aborting the walk, so the rest of the tree is still
@@ -326,7 +338,7 @@ func collectScanDirectories(root string, recursive bool) ([]string, []string) {
 			return nil
 		}
 
-		relPath, relErr := filepath.Rel(root, path)
+		relPath, relErr := filepath.Rel(walkRoot, path)
 		if relErr != nil {
 			walkErrors = append(walkErrors, fmt.Sprintf("failed to resolve %s: %v", path, relErr))
 			return fs.SkipDir

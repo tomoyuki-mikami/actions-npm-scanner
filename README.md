@@ -90,7 +90,7 @@ actions-npm-scanner --local --no-recursive .
 
 A directory scan descends into subdirectories, so a monorepo whose lockfiles all live under `packages/` or `apps/` is covered by scanning the repository root. `node_modules`, `.git`, `vendor`, `.venv`, and `venv` are skipped, because they hold installed third-party artifacts rather than the project's own dependency declarations — the lockfile that produced them is scanned instead. A skipped directory is still scanned when you point the command at it directly.
 
-Findings name the dependency file they came from, so the summary tells you which subdirectory to fix.
+Findings name the subdirectory they came from and the dependency file within it, so the summary tells you which package to fix. Pointing the command at a symlinked directory scans what the link points at; symlinks below the scan root are not followed, so a dependency file only reachable through one is not scanned.
 
 ### From Source
 
@@ -185,7 +185,7 @@ Vulnerabilities found: 1
 Files failed: 0
 Errors: 0
 Vulnerability details:
-  - packages/foo/package-lock.json: Found vulnerable package @ctrl/tinycolor with version 4.1.1 in package-lock.json
+  - ./packages/foo: Found vulnerable package @ctrl/tinycolor with version 4.1.1 in package-lock.json
 ```
 
 ### Verbose Output
@@ -207,7 +207,7 @@ Scanning workflow: .github/workflows/ci.yml
        pnpm-lock.yaml not found. Skipping.
     🔍 Scanning packages/core/package-lock.json...
     ⚠️ Found vulnerabilities:
-      -  Found vulnerable package @ctrl/tinycolor with version 4.1.1 in package.json (dependencies)
+      -  packages/core: Found vulnerable package @ctrl/tinycolor with version 4.1.1 in package-lock.json
   Scan finished for action some-user/vulnerable-action@v1.
 ⚠️ Found vulnerabilities.
 Workflows scanned: 1
@@ -217,7 +217,7 @@ Vulnerabilities found: 1
 Files failed: 0
 Errors: 0
 Vulnerability details:
-  - .github/workflows/ci.yml | some-user/vulnerable-action@v1: Found vulnerable package @ctrl/tinycolor with version 4.1.1 in package.json (dependencies)
+  - .github/workflows/ci.yml | some-user/vulnerable-action@v1 | packages/core: Found vulnerable package @ctrl/tinycolor with version 4.1.1 in package-lock.json
 ```
 
 ## How It Works
@@ -366,7 +366,7 @@ actions-npm-scanner --local --no-recursive .
 
 ディレクトリを指定したスキャンはサブディレクトリまで辿ります。ロックファイルが`packages/`や`apps/`の下にしかないモノレポでも、リポジトリルートを指定すれば対象になります。`node_modules`、`.git`、`vendor`、`.venv`、`venv`は除外します。これらはプロジェクト自身の依存宣言ではなくインストール済みの第三者成果物を置く場所であり、その元になったロックファイルの方をスキャンするためです。除外対象のディレクトリを直接指定した場合は、そのままスキャンします。
 
-検出結果には見つかった依存ファイルのパスが付くため、サマリを見ればどのサブディレクトリを直せばよいかがわかります。
+検出結果には見つかったサブディレクトリと、その中の依存ファイル名が付くため、サマリを見ればどのパッケージを直せばよいかがわかります。シンボリックリンクのディレクトリを指定した場合はリンク先をスキャンします。スキャン対象より下にあるシンボリックリンクは辿らないため、リンク経由でしか到達できない依存ファイルはスキャンしません。
 
 ### ソースから実行
 

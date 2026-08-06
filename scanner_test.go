@@ -267,6 +267,42 @@ func TestCollectScanDirectoriesScansSkippedDirectoryWhenPointedAtIt(t *testing.T
 	assertDirectoriesEqual(t, directories, []string{".", "some-dep"})
 }
 
+// filepath.WalkDir evaluates its root with os.Lstat, so an unresolved symlink
+// root yields no directories at all rather than the tree it points at.
+func TestCollectScanDirectoriesResolvesSymlinkedRoot(t *testing.T) {
+	realRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(realRoot, "packages", "foo"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	linkRoot := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(realRoot, linkRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	directories, walkErrors := collectScanDirectories(linkRoot, true)
+	if len(walkErrors) != 0 {
+		t.Fatalf("unexpected walk errors: %v", walkErrors)
+	}
+
+	assertDirectoriesEqual(t, directories, []string{".", "packages", filepath.Join("packages", "foo")})
+}
+
+// A root that cannot be resolved still scans the directory itself, so the
+// failure is reported instead of silently producing an empty scan.
+func TestCollectScanDirectoriesReportsUnresolvableRoot(t *testing.T) {
+	linkRoot := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(filepath.Join(t.TempDir(), "missing"), linkRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	directories, walkErrors := collectScanDirectories(linkRoot, true)
+	if len(walkErrors) != 1 {
+		t.Fatalf("expected 1 walk error, got %d: %v", len(walkErrors), walkErrors)
+	}
+
+	assertDirectoriesEqual(t, directories, []string{"."})
+}
+
 func TestCollectScanDirectoriesWithoutRecursionReturnsRootOnly(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "packages", "foo"), 0755); err != nil {

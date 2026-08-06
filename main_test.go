@@ -140,16 +140,57 @@ func TestLocalScanFindsDependencyFileInSubdirectory(t *testing.T) {
 	output, err := runScannerCommand("--local", tmpDir)
 	assertExitCode(t, err, 1, output)
 
-	lockfilePath := filepath.Join(tmpDir, "packages", "foo", "package-lock.json")
 	expectedStrings := []string{
 		"⚠️ Found vulnerabilities.",
 		"Dependency files scanned: 1",
 		"Vulnerabilities found: 1",
 		"Files failed: 0",
 		"Errors: 0",
-		// The finding names the file it came from, not the directory the scan
-		// was pointed at.
-		lockfilePath + ": Found vulnerable package @ctrl/tinycolor with version 4.1.1 in package-lock.json",
+		// The finding names the subdirectory it came from, not the directory
+		// the scan was pointed at; the message names the file.
+		filepath.Join(tmpDir, "packages", "foo") + ": Found vulnerable package @ctrl/tinycolor with version 4.1.1 in package-lock.json",
+	}
+	for _, expected := range expectedStrings {
+		assertContains(t, output, expected)
+	}
+}
+
+// A finding at the scanned directory itself keeps that directory as its target,
+// unchanged from before the scan became recursive.
+func TestLocalScanDirectoryFindingKeepsScannedPathAsTarget(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeTestFile(t, filepath.Join(tmpDir, "package.json"), `{
+	  "name": "test-package",
+	  "dependencies": {
+	    "@ctrl/tinycolor": "4.1.1"
+	  }
+	}`)
+
+	output, err := runScannerCommand("--local", tmpDir)
+	assertExitCode(t, err, 1, output)
+
+	assertContains(t, output, tmpDir+": Found vulnerable package @ctrl/tinycolor with version 4.1.1 in package.json (dependencies)")
+}
+
+// os.Stat follows symlinks and filepath.WalkDir does not, so a scan pointed at
+// a symlinked directory used to walk nothing at all and report clean.
+func TestLocalScanFollowsSymlinkedScanRoot(t *testing.T) {
+	realDir := writeMonorepoWithVulnerableSubdirectory(t)
+	linkDir := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := runScannerCommand("--local", linkDir)
+	assertExitCode(t, err, 1, output)
+
+	expectedStrings := []string{
+		"⚠️ Found vulnerabilities.",
+		"Dependency files scanned: 1",
+		"Vulnerabilities found: 1",
+		"Errors: 0",
+		// Reported under the path that was asked about, not the resolved one.
+		filepath.Join(linkDir, "packages", "foo") + ": Found vulnerable package @ctrl/tinycolor with version 4.1.1 in package-lock.json",
 	}
 	for _, expected := range expectedStrings {
 		assertContains(t, output, expected)
