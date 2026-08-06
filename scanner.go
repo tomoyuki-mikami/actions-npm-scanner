@@ -162,6 +162,7 @@ func scanAction(actionDir string, catalog VulnerabilityCatalog, verbose bool) ([
 
 	packageJSONPath := filepath.Join(actionDir, "package.json")
 	packageLockJSONPath := filepath.Join(actionDir, "package-lock.json")
+	npmShrinkwrapJSONPath := filepath.Join(actionDir, "npm-shrinkwrap.json")
 	yarnLockPath := filepath.Join(actionDir, "yarn.lock")
 	pnpmLockPath := filepath.Join(actionDir, "pnpm-lock.yaml")
 
@@ -194,6 +195,22 @@ func scanAction(actionDir string, catalog VulnerabilityCatalog, verbose bool) ([
 	} else {
 		if verbose {
 			fmt.Println("       package-lock.json not found. Skipping.")
+		}
+	}
+
+	// Scan npm-shrinkwrap.json, which npm writes in the package-lock.json format
+	if _, err := os.Stat(npmShrinkwrapJSONPath); err == nil {
+		if verbose {
+			fmt.Println("    🔍 Scanning npm-shrinkwrap.json...")
+		}
+		vulnerabilities, err := scanPackageLockJSONOptimized(npmShrinkwrapJSONPath, vulnerablePackageMap)
+		if err != nil {
+			return nil, err
+		}
+		foundVulnerabilities = append(foundVulnerabilities, vulnerabilities...)
+	} else {
+		if verbose {
+			fmt.Println("       npm-shrinkwrap.json not found. Skipping.")
 		}
 	}
 
@@ -249,7 +266,7 @@ func scanDependencyFile(path string, vulnerablePackageMap, pypiPackageMap Vulner
 	switch filename {
 	case "package.json":
 		return scanPackageJSONOptimized(path, vulnerablePackageMap)
-	case "package-lock.json":
+	case "package-lock.json", "npm-shrinkwrap.json":
 		return scanPackageLockJSONOptimized(path, vulnerablePackageMap)
 	case "yarn.lock":
 		return scanYarnLockOptimized(path, vulnerablePackageMap)

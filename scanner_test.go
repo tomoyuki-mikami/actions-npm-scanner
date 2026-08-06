@@ -142,6 +142,39 @@ func TestScanActionWithPackageLockJSON(t *testing.T) {
 	}
 }
 
+// npm-shrinkwrap.json uses the package-lock.json format and ships inside the
+// published package, so an action can carry one without a package-lock.json.
+func TestScanActionWithNpmShrinkwrapJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	npmShrinkwrapJSON := `{
+	  "lockfileVersion": 3,
+	  "packages": {
+	    "node_modules/@keyv/redis": {
+	      "version": "6.0.0",
+	      "resolved": "https://registry.npmjs.org/@keyv/redis/-/redis-6.0.0.tgz"
+	    }
+	  }
+	}`
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "npm-shrinkwrap.json"), []byte(npmShrinkwrapJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	vulnerabilities, err := ScanAction(tmpDir, GetVulnerabilityCatalog())
+	if err != nil {
+		t.Fatalf("ScanAction() error = %v", err)
+	}
+
+	if len(vulnerabilities) != 1 {
+		t.Fatalf("expected 1 vulnerability, got %v", vulnerabilities)
+	}
+	want := "@keyv/redis with version 6.0.0 in npm-shrinkwrap.json"
+	if !strings.Contains(vulnerabilities[0], want) {
+		t.Errorf("expected vulnerability containing %q, got %q", want, vulnerabilities[0])
+	}
+}
+
 func TestScanActionWithResolvedVersions(t *testing.T) {
 	tmpDir, err := ioutil.TempDir("", "action-")
 	if err != nil {
@@ -841,6 +874,9 @@ func TestKeyvCacheableCompromiseNpmPackages(t *testing.T) {
 		{name: "keyv", packageName: "keyv", version: "6.0.0"},
 		{name: "cacheable", packageName: "cacheable", version: "2.5.1"},
 		{name: "cacheable-scope", packageName: "@cacheable/node-cache", version: "3.1.2"},
+		{name: "keyv-scope-storage", packageName: "@keyv/redis", version: "6.0.0"},
+		{name: "keyv-scope-compression", packageName: "@keyv/compress-brotli", version: "6.0.0"},
+		{name: "keyv-scope-encryption", packageName: "@keyv/encrypt-node", version: "6.0.0"},
 	}
 
 	for _, tt := range tests {
@@ -864,6 +900,51 @@ func TestKeyvCacheableCompromiseNpmPackages(t *testing.T) {
 				t.Errorf("expected vulnerability containing %q, got %q", want, vulnerabilities[0])
 			}
 		})
+	}
+}
+
+// Every @keyv package that the compromised account republished as 6.0.0 on
+// 2026-08-04 must be in the catalog. The scope was previously missing entirely,
+// so a lockfile pinning @keyv/redis@6.0.0 scanned clean.
+func TestKeyvScopeCatalogCoverage(t *testing.T) {
+	republishedAs600 := []string{
+		"@keyv/bigmap",
+		"@keyv/cloudflare-kv",
+		"@keyv/compress-brotli",
+		"@keyv/compress-gzip",
+		"@keyv/compress-lz4",
+		"@keyv/dynamo",
+		"@keyv/encrypt-node",
+		"@keyv/encrypt-web",
+		"@keyv/etcd",
+		"@keyv/memcache",
+		"@keyv/mongo",
+		"@keyv/mysql",
+		"@keyv/postgres",
+		"@keyv/redis",
+		"@keyv/sqlite",
+		"@keyv/test-suite",
+		"@keyv/valkey",
+	}
+
+	catalog := GetVulnerabilityCatalog()
+	for _, packageName := range republishedAs600 {
+		pkg, found := findPackage(catalog.NpmPackages, packageName)
+		if !found {
+			t.Errorf("expected %s to be in the catalog", packageName)
+			continue
+		}
+		if len(pkg.Versions) != 1 || pkg.Versions[0] != "6.0.0" {
+			t.Errorf("expected %s to list only 6.0.0, got %v", packageName, pkg.Versions)
+		}
+	}
+
+	// These two @keyv packages exist on npm but have no 6.0.0 publish record,
+	// so listing them would only produce false positives.
+	for _, packageName := range []string{"@keyv/serialize", "@keyv/offline"} {
+		if _, found := findPackage(catalog.NpmPackages, packageName); found {
+			t.Errorf("expected %s not to be in the catalog", packageName)
+		}
 	}
 }
 
