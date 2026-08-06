@@ -132,6 +132,89 @@ func TestLocalScanDirectoryWithVulnerability(t *testing.T) {
 	assertNotContains(t, output, "🔍 Scanning package.json...")
 }
 
+// A pnpm v9 lockfile used to abort the whole directory scan, which silently
+// dropped the findings of the package.json next to it.
+func TestLocalScanDirectoryWithPnpmV9Lockfile(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeTestFile(t, filepath.Join(tmpDir, "package.json"), `{
+	  "dependencies": {
+	    "@ctrl/tinycolor": "4.1.1"
+	  }
+	}`)
+	writeTestFile(t, filepath.Join(tmpDir, "pnpm-lock.yaml"), `lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    dependencies:
+      '@ctrl/tinycolor':
+        specifier: ^4.1.1
+        version: 4.1.1
+
+packages:
+
+  '@ctrl/tinycolor@4.1.1':
+    resolution: {integrity: sha512-...}
+`)
+
+	output, err := runScannerCommand("--local", tmpDir)
+	assertExitCode(t, err, 1, output)
+
+	expectedStrings := []string{
+		"Vulnerabilities found: 2",
+		"Files failed: 0",
+		"Errors: 0",
+		"Found vulnerable package @ctrl/tinycolor with version 4.1.1 in package.json",
+		"Found vulnerable package @ctrl/tinycolor with version 4.1.1 in pnpm-lock.yaml",
+	}
+	for _, expected := range expectedStrings {
+		assertContains(t, output, expected)
+	}
+}
+
+// One unparsable dependency file must not discard the findings of the others.
+func TestLocalScanDirectoryKeepsFindingsWhenDependencyFileFails(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeTestFile(t, filepath.Join(tmpDir, "package.json"), `{
+	  "dependencies": {
+	    "@ctrl/tinycolor": "4.1.1"
+	  }
+	}`)
+	writeTestFile(t, filepath.Join(tmpDir, "pnpm-lock.yaml"), "packages: [\n")
+
+	output, err := runScannerCommand("--local", tmpDir)
+	assertExitCode(t, err, 1, output)
+
+	expectedStrings := []string{
+		"Found vulnerable package @ctrl/tinycolor with version 4.1.1 in package.json",
+		"Vulnerabilities found: 1",
+		"Files failed: 1",
+		"Errors: 1",
+	}
+	for _, expected := range expectedStrings {
+		assertContains(t, output, expected)
+	}
+}
+
+func TestFailOnErrorExitsWithDedicatedCode(t *testing.T) {
+	tmpDir := t.TempDir()
+	workflowPath := filepath.Join(tmpDir, "workflow.yml")
+	writeTestFile(t, workflowPath, "jobs:\n  build:\n    steps: [\n")
+
+	output, err := runScannerBinary(t, "--fail-on-error", workflowPath)
+	assertExitCode(t, err, 2, output)
+
+	expectedStrings := []string{
+		"✅ No vulnerabilities found.",
+		"Files failed: 1",
+		"Errors: 1",
+		"Error details:",
+	}
+	for _, expected := range expectedStrings {
+		assertContains(t, output, expected)
+	}
+}
+
 func TestLocalScanCleanFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	packageJSONPath := filepath.Join(tmpDir, "package.json")
@@ -202,6 +285,23 @@ func runScannerCommand(args ...string) (string, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "go", cmdArgs...)
 	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// runScannerBinary runs a compiled binary instead of `go run`, which reports its
+// own exit code 1 for any non-zero exit of the scanner. Use it whenever a test
+// asserts on a specific exit code other than 0 or 1.
+func runScannerBinary(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+
+	binaryPath := filepath.Join(t.TempDir(), "actions-npm-scanner")
+	if out, err := exec.Command("go", "build", "-o", binaryPath, ".").CombinedOutput(); err != nil {
+		t.Fatalf("failed to build scanner: %v\n%s", err, out)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, binaryPath, args...).CombinedOutput()
 	return string(out), err
 }
 
