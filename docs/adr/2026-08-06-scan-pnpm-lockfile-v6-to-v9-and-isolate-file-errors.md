@@ -33,7 +33,7 @@ In scope:
 
 Non-goals:
 
-- Do not change the default exit codes: `1` still means a vulnerability was found and `0` still means the scan finished without one, whether or not some files failed.
+- Do not change the default exit codes. For a completed scan, `1` still means a vulnerability was found and `0` still means the scan finished without one, whether or not some files failed. A top-level error that prevents the scan from producing a summary at all (a bad invocation, an unreadable path, or a failed single-file `--local` parse) keeps its pre-existing exit code `1`; only `--fail-on-error` changes it, to `2`.
 - Do not scan pnpm workspace members outside the scanned directory; `importers` entries are read from the lockfile only.
 - Do not resolve the peer-dependency variants of a package as separate findings; the base version is what the catalog matches.
 
