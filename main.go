@@ -40,17 +40,22 @@ func main() {
 	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error:", err)
+		if *failOnError {
+			os.Exit(2)
+		}
 		os.Exit(1)
 	}
 	printScanSummary(summary)
-	if summary.HasVulnerabilities() {
-		os.Exit(1)
-	}
 	// Any error means the scan was incomplete, so the flag keys off the error
 	// count rather than Files failed. An action that could not be downloaded
-	// leaves Files failed at zero yet was never scanned at all.
+	// leaves Files failed at zero yet was never scanned at all. The error check
+	// runs before the vulnerability check: an incomplete scan may hide further
+	// findings, so exit 2 takes precedence over exit 1 when the flag is set.
 	if *failOnError && summary.HasErrors() {
 		os.Exit(2)
+	}
+	if summary.HasVulnerabilities() {
+		os.Exit(1)
 	}
 }
 

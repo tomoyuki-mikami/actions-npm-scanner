@@ -215,6 +215,82 @@ func TestFailOnErrorExitsWithDedicatedCode(t *testing.T) {
 	}
 }
 
+// A top-level scan error (here: an unparsable single file) exits before a
+// summary is produced, but --fail-on-error must still turn it into exit 2.
+func TestFailOnErrorAppliesToTopLevelScanError(t *testing.T) {
+	tmpDir := t.TempDir()
+	packageJSONPath := filepath.Join(tmpDir, "package.json")
+	writeTestFile(t, packageJSONPath, "{ not json")
+
+	output, err := runScannerBinary(t, "--fail-on-error", "--local", packageJSONPath)
+	assertExitCode(t, err, 2, output)
+	assertContains(t, output, "Error:")
+
+	// Without the flag the default exit code stays 1.
+	output, err = runScannerBinary(t, "--local", packageJSONPath)
+	assertExitCode(t, err, 1, output)
+}
+
+// When a scan both finds a vulnerability and fails on a file, --fail-on-error
+// must report the incomplete scan (exit 2), not the finding (exit 1); an
+// incomplete scan may hide further findings.
+func TestFailOnErrorTakesPrecedenceOverVulnerabilityExit(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeTestFile(t, filepath.Join(tmpDir, "package.json"), `{
+	  "dependencies": {
+	    "@ctrl/tinycolor": "4.1.1"
+	  }
+	}`)
+	writeTestFile(t, filepath.Join(tmpDir, "pnpm-lock.yaml"), "packages: [\n")
+
+	output, err := runScannerBinary(t, "--fail-on-error", "--local", tmpDir)
+	assertExitCode(t, err, 2, output)
+
+	expectedStrings := []string{
+		"Vulnerabilities found: 1",
+		"Files failed: 1",
+		"Errors: 1",
+	}
+	for _, expected := range expectedStrings {
+		assertContains(t, output, expected)
+	}
+
+	// Without the flag the default exit code stays 1 (vulnerability found).
+	output, err = runScannerBinary(t, "--local", tmpDir)
+	assertExitCode(t, err, 1, output)
+}
+
+// A dependency file that is a symlink to a missing target must be reported as
+// a failed file, not silently skipped as "not found". Covers both the npm and
+// the Python lockfile loop.
+func TestBrokenSymlinkDependencyFileIsReportedAsError(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeTestFile(t, filepath.Join(tmpDir, "package.json"), `{
+	  "dependencies": {
+	    "@ctrl/tinycolor": "4.1.1"
+	  }
+	}`)
+	if err := os.Symlink(filepath.Join(tmpDir, "does-not-exist"), filepath.Join(tmpDir, "pnpm-lock.yaml")); err != nil {
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(tmpDir, "does-not-exist"), filepath.Join(tmpDir, "Pipfile.lock")); err != nil {
+		t.Fatalf("failed to create symlink: %v", err)
+	}
+
+	output, err := runScannerCommand("--local", tmpDir)
+	assertExitCode(t, err, 1, output)
+
+	expectedStrings := []string{
+		"Found vulnerable package @ctrl/tinycolor with version 4.1.1 in package.json",
+		"Vulnerabilities found: 1",
+		"Files failed: 2",
+		"Errors: 2",
+	}
+	for _, expected := range expectedStrings {
+		assertContains(t, output, expected)
+	}
+}
+
 func TestLocalScanCleanFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	packageJSONPath := filepath.Join(tmpDir, "package.json")

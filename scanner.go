@@ -232,9 +232,16 @@ func scanAction(actionDir string, catalog VulnerabilityCatalog, verbose bool) ac
 
 	for _, npmScanner := range npmScanners {
 		path := filepath.Join(actionDir, npmScanner.filename)
-		if _, err := os.Stat(path); err != nil {
-			if verbose {
-				fmt.Printf("       %s not found. Skipping.\n", npmScanner.filename)
+		if err := statDependencyFile(path); err != nil {
+			if errors.Is(err, errDependencyFileAbsent) {
+				if verbose {
+					fmt.Printf("       %s not found. Skipping.\n", npmScanner.filename)
+				}
+			} else {
+				result.FileErrors = append(result.FileErrors, err.Error())
+				if verbose {
+					fmt.Fprintf(os.Stderr, "    Error scanning %s: %v\n", npmScanner.filename, err)
+				}
 			}
 			continue
 		}
@@ -257,6 +264,24 @@ func scanAction(actionDir string, catalog VulnerabilityCatalog, verbose bool) ac
 	result.merge(pythonResult.Vulnerabilities, pythonResult.FileErrors)
 
 	return result
+}
+
+// errDependencyFileAbsent means no directory entry exists at the path, so the
+// file can be skipped as genuinely missing.
+var errDependencyFileAbsent = errors.New("dependency file absent")
+
+// statDependencyFile distinguishes a missing dependency file from one whose
+// entry exists but cannot be resolved. A broken symlink makes os.Stat return
+// ENOENT even though the entry is there, and skipping it as "not found" would
+// hide the failure from the summary, so os.Lstat checks the entry itself.
+func statDependencyFile(path string) error {
+	if _, err := os.Stat(path); err != nil {
+		if _, lstatErr := os.Lstat(path); lstatErr != nil {
+			return errDependencyFileAbsent
+		}
+		return fmt.Errorf("failed to stat %s: %w", path, err)
+	}
+	return nil
 }
 
 func scanDependencyFile(path string, vulnerablePackageMap, pypiPackageMap VulnerablePackageMap) ([]string, error) {
@@ -373,9 +398,13 @@ func scanPythonDependencyFiles(actionDir string, vulnerablePackageMap Vulnerable
 
 	for _, lockScanner := range lockScanners {
 		path := filepath.Join(actionDir, lockScanner.filename)
-		if _, err := os.Stat(path); err != nil {
-			if verbose {
-				fmt.Printf("       %s not found. Skipping.\n", lockScanner.filename)
+		if err := statDependencyFile(path); err != nil {
+			if errors.Is(err, errDependencyFileAbsent) {
+				if verbose {
+					fmt.Printf("       %s not found. Skipping.\n", lockScanner.filename)
+				}
+			} else {
+				recordError(lockScanner.filename, err)
 			}
 			continue
 		}
