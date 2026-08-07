@@ -150,9 +150,9 @@ func TestScanActionWithNpmShrinkwrapJSON(t *testing.T) {
 	npmShrinkwrapJSON := `{
 	  "lockfileVersion": 3,
 	  "packages": {
-	    "node_modules/@keyv/redis": {
+	    "node_modules/keyv": {
 	      "version": "6.0.0",
-	      "resolved": "https://registry.npmjs.org/@keyv/redis/-/redis-6.0.0.tgz"
+	      "resolved": "https://registry.npmjs.org/keyv/-/keyv-6.0.0.tgz"
 	    }
 	  }
 	}`
@@ -169,10 +169,71 @@ func TestScanActionWithNpmShrinkwrapJSON(t *testing.T) {
 	if len(vulnerabilities) != 1 {
 		t.Fatalf("expected 1 vulnerability, got %v", vulnerabilities)
 	}
-	want := "@keyv/redis with version 6.0.0 in npm-shrinkwrap.json"
+	want := "keyv with version 6.0.0 in npm-shrinkwrap.json"
 	if !strings.Contains(vulnerabilities[0], want) {
 		t.Errorf("expected vulnerability containing %q, got %q", want, vulnerabilities[0])
 	}
+}
+
+// When npm-shrinkwrap.json and package-lock.json coexist, npm installs from
+// the shrinkwrap and ignores the package-lock, so the scanner must do the
+// same in both directions: a stale vulnerable package-lock next to a safe
+// shrinkwrap must not fire, and a vulnerable shrinkwrap must fire even when
+// the package-lock next to it is safe.
+func TestScanActionNpmShrinkwrapTakesPrecedenceOverPackageLock(t *testing.T) {
+	lockJSON := func(version string) string {
+		return `{
+	  "lockfileVersion": 3,
+	  "packages": {
+	    "node_modules/keyv": {
+	      "version": "` + version + `",
+	      "resolved": "https://registry.npmjs.org/keyv/-/keyv-` + version + `.tgz"
+	    }
+	  }
+	}`
+	}
+	const safeVersion = "5.5.4"
+	const vulnerableVersion = "6.0.0"
+
+	t.Run("safe shrinkwrap hides stale vulnerable package-lock", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(tmpDir, "npm-shrinkwrap.json"), []byte(lockJSON(safeVersion)), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmpDir, "package-lock.json"), []byte(lockJSON(vulnerableVersion)), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		vulnerabilities, err := ScanAction(tmpDir, GetVulnerabilityCatalog())
+		if err != nil {
+			t.Fatalf("ScanAction() error = %v", err)
+		}
+		if len(vulnerabilities) != 0 {
+			t.Errorf("expected no vulnerabilities, got %v", vulnerabilities)
+		}
+	})
+
+	t.Run("vulnerable shrinkwrap is detected despite safe package-lock", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(tmpDir, "npm-shrinkwrap.json"), []byte(lockJSON(vulnerableVersion)), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(tmpDir, "package-lock.json"), []byte(lockJSON(safeVersion)), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		vulnerabilities, err := ScanAction(tmpDir, GetVulnerabilityCatalog())
+		if err != nil {
+			t.Fatalf("ScanAction() error = %v", err)
+		}
+		if len(vulnerabilities) != 1 {
+			t.Fatalf("expected 1 vulnerability, got %v", vulnerabilities)
+		}
+		want := "keyv with version 6.0.0 in npm-shrinkwrap.json"
+		if !strings.Contains(vulnerabilities[0], want) {
+			t.Errorf("expected vulnerability containing %q, got %q", want, vulnerabilities[0])
+		}
+	})
 }
 
 func TestScanActionWithResolvedVersions(t *testing.T) {
@@ -874,9 +935,6 @@ func TestKeyvCacheableCompromiseNpmPackages(t *testing.T) {
 		{name: "keyv", packageName: "keyv", version: "6.0.0"},
 		{name: "cacheable", packageName: "cacheable", version: "2.5.1"},
 		{name: "cacheable-scope", packageName: "@cacheable/node-cache", version: "3.1.2"},
-		{name: "keyv-scope-storage", packageName: "@keyv/redis", version: "6.0.0"},
-		{name: "keyv-scope-compression", packageName: "@keyv/compress-brotli", version: "6.0.0"},
-		{name: "keyv-scope-encryption", packageName: "@keyv/encrypt-node", version: "6.0.0"},
 	}
 
 	for _, tt := range tests {
@@ -903,47 +961,15 @@ func TestKeyvCacheableCompromiseNpmPackages(t *testing.T) {
 	}
 }
 
-// Every @keyv package that the compromised account republished as 6.0.0 on
-// 2026-08-04 must be in the catalog. The scope was previously missing entirely,
-// so a lockfile pinning @keyv/redis@6.0.0 scanned clean.
-func TestKeyvScopeCatalogCoverage(t *testing.T) {
-	republishedAs600 := []string{
-		"@keyv/bigmap",
-		"@keyv/cloudflare-kv",
-		"@keyv/compress-brotli",
-		"@keyv/compress-gzip",
-		"@keyv/compress-lz4",
-		"@keyv/dynamo",
-		"@keyv/encrypt-node",
-		"@keyv/encrypt-web",
-		"@keyv/etcd",
-		"@keyv/memcache",
-		"@keyv/mongo",
-		"@keyv/mysql",
-		"@keyv/postgres",
-		"@keyv/redis",
-		"@keyv/sqlite",
-		"@keyv/test-suite",
-		"@keyv/valkey",
-	}
-
+// The catalog lists confirmed compromises only. No payload-level analysis has
+// confirmed the @keyv/*@6.0.0 tarballs republished on 2026-08-04 as malicious
+// (Socket calls them suspect, Snyk cleared the rest of the scope), so the
+// whole scope stays out of the catalog until such evidence exists.
+func TestKeyvScopeStaysOutOfConfirmedCatalog(t *testing.T) {
 	catalog := GetVulnerabilityCatalog()
-	for _, packageName := range republishedAs600 {
-		pkg, found := findPackage(catalog.NpmPackages, packageName)
-		if !found {
-			t.Errorf("expected %s to be in the catalog", packageName)
-			continue
-		}
-		if len(pkg.Versions) != 1 || pkg.Versions[0] != "6.0.0" {
-			t.Errorf("expected %s to list only 6.0.0, got %v", packageName, pkg.Versions)
-		}
-	}
-
-	// These two @keyv packages exist on npm but have no 6.0.0 publish record,
-	// so listing them would only produce false positives.
-	for _, packageName := range []string{"@keyv/serialize", "@keyv/offline"} {
-		if _, found := findPackage(catalog.NpmPackages, packageName); found {
-			t.Errorf("expected %s not to be in the catalog", packageName)
+	for _, pkg := range catalog.NpmPackages {
+		if strings.HasPrefix(pkg.Name, "@keyv/") {
+			t.Errorf("expected no @keyv/* entry in the confirmed catalog, found %s %v", pkg.Name, pkg.Versions)
 		}
 	}
 }

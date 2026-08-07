@@ -16,7 +16,7 @@ On August 4, 2026, Socket reported an active compromise that began in the `keyv`
 - [Socket technical analysis](https://socket.dev/blog/popular-npm-packages-in-the-keyv-and-cacheable-namespaces-compromised-in-active-supply-chain)
 - [Socket campaign tracker and affected package list](https://socket.dev/supply-chain-attacks/keyv-and-cacheable-compromise)
 
-The catalog also covers the `@keyv` scope. The compromised account republished 17 `@keyv/*` packages as version `6.0.0` within about two and a half minutes on August 4, 2026, and all of them were later removed from the registry. The npm registry still records the publish timestamps, which is what the catalog entries are based on.
+The `@keyv` scope itself is deliberately not in the catalog. The `@keyv/*@6.0.0` tarballs republished on August 4, 2026 were removed from the registry, but no payload-level analysis has confirmed them as malicious — Socket classifies them as suspect and Snyk's tarball sweep cleared the rest of the scope. The catalog lists confirmed compromises only, so those releases stay out until such evidence exists.
 
 Socket's campaign data also listed 24 Go artifacts across 8 modules. Go module scanning is outside this tool's current scope, so those entries are not included in the catalog.
 
@@ -168,7 +168,6 @@ Scanning workflow: .github/workflows/ci.yml
   🔍 Scanning action actions/checkout@v4...
     🔍 Scanning package.json...
     🔍 Scanning package-lock.json...
-       npm-shrinkwrap.json not found. Skipping.
        yarn.lock not found. Skipping.
        pnpm-lock.yaml not found. Skipping.
     ✅ No vulnerabilities found.
@@ -176,8 +175,7 @@ Scanning workflow: .github/workflows/ci.yml
   Downloading action some-user/vulnerable-action@v1...
   🔍 Scanning action some-user/vulnerable-action@v1...
     🔍 Scanning package.json...
-       package-lock.json not found. Skipping.
-       npm-shrinkwrap.json not found. Skipping.
+       package-lock.json / npm-shrinkwrap.json not found. Skipping.
        yarn.lock not found. Skipping.
        pnpm-lock.yaml not found. Skipping.
     ⚠️ Found vulnerabilities:
@@ -268,7 +266,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [Socketの技術分析](https://socket.dev/blog/popular-npm-packages-in-the-keyv-and-cacheable-namespaces-compromised-in-active-supply-chain)
 - [Socketのキャンペーントラッカーと影響パッケージ一覧](https://socket.dev/supply-chain-attacks/keyv-and-cacheable-compromise)
 
-カタログは`@keyv`スコープも収録しています。侵害されたアカウントは2026年8月4日、約2分半のあいだに`@keyv/*` 17パッケージをバージョン`6.0.0`として一斉に公開し、それらはのちにすべてレジストリから削除されました。npmレジストリには公開時刻の記録が残っており、カタログの登録はこの記録を根拠としています。
+`@keyv`スコープ自体は意図的にカタログへ収録していません。2026年8月4日に再公開された`@keyv/*@6.0.0`はレジストリから削除されたものの、悪意あるペイロードを含んでいたことを確認した分析は存在しません。Socketは「疑わしい(suspect)」と分類し、Snykのtarball調査はスコープ内の他パッケージを非侵害と結論づけています。このカタログは侵害が確認されたものだけを収録する方針のため、証拠が出るまでこれらのリリースは対象外とします。
 
 Socketのキャンペーンデータには、Go 8モジュール、24 artifactsも掲載されていました。現在このツールはGoモジュールをスキャンしないため、これらはカタログに含めていません。
 
