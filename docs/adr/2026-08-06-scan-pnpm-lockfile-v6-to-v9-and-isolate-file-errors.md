@@ -57,15 +57,15 @@ Non-goals:
 
 ## Verification
 
-- [ ] `gofmt`, `go vet ./...`, and `go test ./...` pass.
-- [ ] `TestScanActionWithPnpmLockV9` / `TestLocalScanDirectoryWithPnpmV9Lockfile`: a v9 lockfile is scanned and the `package.json` findings next to it survive.
-- [ ] `TestExtractPackageNameAndVersionFromPnpmPath`: v5/v6–v8/v9 keys, both peer-suffix forms, digit-leading scoped names, underscore-containing names.
-- [ ] `TestScanActionKeepsFindingsWhenDependencyFileFails` / `TestLocalScanDirectoryKeepsFindingsWhenDependencyFileFails`: a broken lockfile does not discard neighbouring findings.
-- [ ] `TestFailOnErrorExitsWithDedicatedCode`: a failed workflow parse exits `2` with the flag.
-- [ ] `TestFailOnErrorAppliesToTopLevelScanError`: an unparsable single `--local` file exits `2` with the flag and `1` without.
-- [ ] `TestFailOnErrorTakesPrecedenceOverVulnerabilityExit`: a vulnerability plus a failed file exits `2` with the flag and `1` without.
-- [ ] `TestBrokenSymlinkDependencyFileIsReportedAsError`: a symlink to a missing target counts as a failed file in both the npm and the Python loop.
-- [ ] `TestWorkflowParseErrorAppearsInSummaryWithoutFailureExit`: without the flag, errors alone still exit `0`.
+- [x] `gofmt`, `go vet ./...`, and `go test ./...` pass.
+- [x] `TestScanActionWithPnpmLockV9` / `TestLocalScanDirectoryWithPnpmV9Lockfile`: a v9 lockfile is scanned and the `package.json` findings next to it survive.
+- [x] `TestExtractPackageNameAndVersionFromPnpmPath`: v5/v6–v8/v9 keys, both peer-suffix forms, digit-leading scoped names, underscore-containing names.
+- [x] `TestScanActionKeepsFindingsWhenDependencyFileFails` / `TestLocalScanDirectoryKeepsFindingsWhenDependencyFileFails`: a broken lockfile does not discard neighbouring findings.
+- [x] `TestFailOnErrorExitsWithDedicatedCode`: a failed workflow parse exits `2` with the flag.
+- [x] `TestFailOnErrorAppliesToTopLevelScanError`: an unparsable single `--local` file exits `2` with the flag and `1` without.
+- [x] `TestFailOnErrorTakesPrecedenceOverVulnerabilityExit`: a vulnerability plus a failed file exits `2` with the flag and `1` without.
+- [x] `TestBrokenSymlinkDependencyFileIsReportedAsError`: a symlink to a missing target counts as a failed file in both the npm and the Python loop.
+- [x] `TestWorkflowParseErrorAppearsInSummaryWithoutFailureExit`: without the flag, errors alone still exit `0`.
 
 ## Alternatives Considered
 
