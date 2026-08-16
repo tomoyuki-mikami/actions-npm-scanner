@@ -277,7 +277,10 @@ var errDependencyFileAbsent = errors.New("dependency file absent")
 func statDependencyFile(path string) error {
 	if _, err := os.Stat(path); err != nil {
 		if _, lstatErr := os.Lstat(path); lstatErr != nil {
-			return errDependencyFileAbsent
+			if errors.Is(lstatErr, os.ErrNotExist) {
+				return errDependencyFileAbsent
+			}
+			return fmt.Errorf("failed to lstat %s: %w", path, lstatErr)
 		}
 		return fmt.Errorf("failed to stat %s: %w", path, err)
 	}

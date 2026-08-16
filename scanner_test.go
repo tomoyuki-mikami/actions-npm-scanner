@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -8,6 +9,68 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestStatDependencyFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	regularFile := filepath.Join(tmpDir, "package.json")
+	if err := os.WriteFile(regularFile, []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	brokenSymlink := filepath.Join(tmpDir, "broken-link")
+	if err := os.Symlink(filepath.Join(tmpDir, "missing-target"), brokenSymlink); err != nil {
+		t.Fatal(err)
+	}
+	_, brokenSymlinkError := os.Stat(brokenSymlink)
+	if brokenSymlinkError == nil {
+		t.Fatal("test fixture did not produce a broken symlink Stat error")
+	}
+	brokenSymlinkCause := errors.Unwrap(brokenSymlinkError)
+
+	nonNotExistPath := filepath.Join(tmpDir, "invalid\x00path")
+	_, nonNotExistError := os.Lstat(nonNotExistPath)
+	if nonNotExistError == nil || errors.Is(nonNotExistError, os.ErrNotExist) {
+		t.Fatalf("test fixture did not produce a non-not-exist Lstat error: %v", nonNotExistError)
+	}
+	nonNotExistCause := errors.Unwrap(nonNotExistError)
+
+	tests := []struct {
+		name       string
+		path       string
+		wantErr    bool
+		wantAbsent bool
+		wantCause  error
+	}{
+		{name: "regular file", path: regularFile},
+		{name: "absent entry", path: filepath.Join(tmpDir, "missing"), wantErr: true, wantAbsent: true},
+		{name: "broken symlink", path: brokenSymlink, wantErr: true, wantCause: brokenSymlinkCause},
+		{name: "non-not-exist Lstat error", path: nonNotExistPath, wantErr: true, wantCause: nonNotExistCause},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := statDependencyFile(tt.path)
+			if !tt.wantErr {
+				if err != nil {
+					t.Fatalf("statDependencyFile() error = %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("statDependencyFile() error = nil")
+			}
+			if got := errors.Is(err, errDependencyFileAbsent); got != tt.wantAbsent {
+				t.Fatalf("errors.Is(err, errDependencyFileAbsent) = %v, want %v; err = %v", got, tt.wantAbsent, err)
+			}
+			if tt.wantCause != nil && !errors.Is(err, tt.wantCause) {
+				t.Fatalf("statDependencyFile() error = %v, want wrapped cause %v", err, tt.wantCause)
+			}
+			if !strings.Contains(err.Error(), tt.path) && !tt.wantAbsent {
+				t.Fatalf("statDependencyFile() error = %v, want path %q", err, tt.path)
+			}
+		})
+	}
+}
 
 func testNpmCatalog(vulnerablePackages []VulnerablePackage) VulnerabilityCatalog {
 	return VulnerabilityCatalog{NpmPackages: vulnerablePackages}

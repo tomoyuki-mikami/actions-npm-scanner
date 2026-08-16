@@ -29,7 +29,7 @@ In scope:
 - Report the number of unscanned files as `Files failed` in the summary and write error details to stderr.
 - Add `--fail-on-error` to exit with status code `2` when the scan reported at least one error. Key the flag off the error count rather than `Files failed`, because an action that could not be downloaded was never scanned at all yet reaches none of its files, so it leaves `Files failed` at zero.
 - Apply the flag to every error path, including a top-level failure that aborts the scan before a summary exists (for example an unparsable single `--local` file), and give the error exit precedence over the vulnerability exit when both apply: an incomplete scan may hide further findings, so `2` must not be masked by `1`.
-- Report a dependency file whose directory entry exists but cannot be resolved (a symlink to a missing target) as a failed file instead of skipping it as "not found"; only a genuinely absent entry is skipped.
+- Report a dependency file whose directory entry exists but cannot be resolved (a symlink to a missing target) as a failed file instead of skipping it as "not found". Skip only when `os.Lstat` reports that the entry does not exist; record every other `os.Lstat` failure as a per-file error with its cause.
 
 Non-goals:
 
@@ -51,7 +51,7 @@ Non-goals:
 - **Affected paths**: `scanner.go`, `main.go`, `scanner_test.go`, `main_test.go`, `README.md`, `docs/adr/`.
 - **Dependencies**: no new dependencies; `gopkg.in/yaml.v3` already provides `yaml.Node` for the version field.
 - **Lockfile parsing** (`scanner.go`): `PnpmLock.LockfileVersion` becomes a `yaml.Node`; `extractPackageNameAndVersionFromPnpmPath` resolves the v5, v6–v8, and v9 key shapes; `cleanPnpmVersion` strips both peer-suffix forms and rejects candidates containing `@` or `/`; `collectPnpmPackageEntries` gathers `packages`, `snapshots`, `importers`, and the top-level dependency maps, deduplicated.
-- **Error isolation** (`scanner.go`): `scanAction` records each file's failure in `actionScanResult.FileErrors` and continues; `statDependencyFile` distinguishes a missing entry (`os.Lstat` fails too — skip) from an unresolvable one (entry exists but `os.Stat` fails — record), in both the npm and the Python lockfile loop.
+- **Error isolation** (`scanner.go`): `scanAction` records each file's failure in `actionScanResult.FileErrors` and continues; `statDependencyFile` skips only an entry for which `os.Lstat` returns not-exist, records other `os.Lstat` failures with their cause, and records an unresolvable entry when `os.Lstat` succeeds but `os.Stat` fails, in both the npm and the Python lockfile loop.
 - **Exit codes** (`main.go`): with `--fail-on-error`, a top-level scan error exits `2` instead of `1`, and after a completed scan the `HasErrors()` check runs before the `HasVulnerabilities()` check. Precedence with the flag set: error (`2`) > vulnerability (`1`) > clean (`0`). Without the flag the codes are unchanged: vulnerability (`1`) > clean (`0`), errors alone exit `0` after a completed scan.
 - **Tests**: exit-code-specific assertions use a compiled binary (`runScannerBinary`), because `go run` reports its own exit code `1` for any non-zero child exit.
 
